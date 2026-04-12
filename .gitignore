@@ -1,0 +1,28 @@
+# Build artifacts
+/build/
+/build_closure/
+/out/
+/bin/
+/obj/
+*.obj
+*.pdb
+*.ilk
+*.idb
+*.vcxproj.user
+*.sln
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+
+# Generated exports / sessions
+/exports/
+/sessions/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vs/
+.vscode/
