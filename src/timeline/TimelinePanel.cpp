@@ -75,31 +75,45 @@ void TimelinePanel::Draw(AppContext& context, float height)
 
     const int normalizedBase = -(std::min)(0, (std::min)(context.session.pairing.fixedTimelineOffset,
                                                           context.session.pairing.movingTimelineOffset));
-    DrawStackTimeline(context,
-                      "Stack A",
-                      context.session.stackA,
-                      context.session.projectPreferences.activeSliceA,
-                      context.session.pairing.fixedTimelineOffset,
-                      context.session.pairing.fixedTimelineOffset + normalizedBase);
-    DrawStackTimeline(context,
-                      "Stack B",
-                      context.session.stackB,
-                      context.session.projectPreferences.activeSliceB,
-                      context.session.pairing.movingTimelineOffset,
-                      context.session.pairing.movingTimelineOffset + normalizedBase);
+    const int normOffsetA = context.session.pairing.fixedTimelineOffset  + normalizedBase;
+    const int normOffsetB = context.session.pairing.movingTimelineOffset + normalizedBase;
 
+    // Both stacks share a single scrollable area — no more vertical scrolling to find Stack B
+    ImGui::BeginChild("Timelines", ImVec2(0.0f, 0.0f), false, ImGuiWindowFlags_HorizontalScrollbar);
+
+    const float widthA = DrawStackTimeline(context,
+                                           "Stack A",
+                                           context.session.stackA,
+                                           context.session.projectPreferences.activeSliceA,
+                                           context.session.pairing.fixedTimelineOffset,
+                                           normOffsetA);
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    const float widthB = DrawStackTimeline(context,
+                                           "Stack B",
+                                           context.session.stackB,
+                                           context.session.projectPreferences.activeSliceB,
+                                           context.session.pairing.movingTimelineOffset,
+                                           normOffsetB);
+
+    // One Dummy sized to the wider row ensures the scrollbar covers both stacks
+    ImGui::Dummy(ImVec2((std::max)(widthA, widthB), 1.0f));
+
+    ImGui::EndChild();
     ImGui::EndChild();
 }
 
-void TimelinePanel::DrawStackTimeline(AppContext& context,
-                                      const char* label,
-                                      StackModel& stack,
-                                      int& activeIndex,
-                                      int& timelineOffset,
-                                      int normalizedOffset)
+float TimelinePanel::DrawStackTimeline(AppContext& context,
+                                       const char* label,
+                                       StackModel& stack,
+                                       int& activeIndex,
+                                       int& timelineOffset,
+                                       int normalizedOffset)
 {
     ImGui::Text("%s (%d slices)", label, static_cast<int>(stack.slices.size()));
-    ImGui::BeginChild(label, ImVec2(0.0f, 0.0f), true, ImGuiWindowFlags_HorizontalScrollbar);
 
     ImGui::PushID(label);
     ImGui::InvisibleButton("drag_strip", ImVec2((std::max)(ImGui::GetContentRegionAvail().x, 180.0f), 18.0f));
@@ -226,9 +240,8 @@ void TimelinePanel::DrawStackTimeline(AppContext& context,
 
     const float contentWidth = normalizedOffset * kTimelineCellAdvance +
                                static_cast<float>(stack.slices.size()) * kTimelineCellAdvance + 24.0f;
-    ImGui::Dummy(ImVec2(contentWidth, 1.0f));
     ImGui::PopID();
-    ImGui::EndChild();
+    return contentWidth;
 }
 
 ImageTexture* TimelinePanel::GetOrCreateThumbnail(const SliceRecord& slice)

@@ -6,7 +6,7 @@ O projeto foi desenhado para Windows e hoje já cobre:
 
 - carregamento de duas pilhas completas
 - `Stack A` como referência e `Stack B` como pilha móvel
-- timeline dupla com deslocamento visual entre stacks
+- timeline unificada com as duas pilhas em um único painel rolável
 - viewers de referência, móvel e preview
 - modos de preview `blend`, `checkerboard`, `difference` e `multiply`
 - zoom e pan por mouse nos viewers
@@ -53,15 +53,23 @@ C:\temp\AlignImagesBuild\Debug\AlignImages.exe
 
 ## Estado atual
 
-O software já está em fase testável, com foco atual em:
+O software já está em fase testável. Melhorias recentes:
 
-- estabilização de UI e workflow
-- melhoria de performance do motor de registro
-- ampliação dos métodos automáticos de alinhamento
+**Motor de registro (abril 2026)**
+
+- dados da imagem de referência pré-computados uma única vez por chamada (gradiente Sobel, área da máscara), eliminando ~79 recálculos redundantes por iteração
+- pirâmide de resolução: nível coarse opera em 1/4, médio em 1/2 e fino em resolução completa
+- early exit quando o score de máscara é negligível, evitando cálculo de gradiente desnecessário
+- avaliação dos 80 candidatos por iteração em paralelo (`std::execution::par_unseq`)
+- `cv::moments()` calculado uma única vez em `ComputeMaskStats` (era calculado duas vezes)
+- structuring elements morfológicos estáticos (`static const`), criados apenas na primeira chamada
+
+**Timeline (abril 2026)**
+
+- Stack A e Stack B unificados em um único painel com uma barra de rolagem horizontal compartilhada, eliminando a necessidade de rolar verticalmente para ver a segunda pilha
 
 ## Próximos passos naturais
 
-- otimização do motor de registro
-- estratégias automáticas adicionais
+- estratégias automáticas adicionais de alinhamento
 - processamento assíncrono para mais operações pesadas
-- acabamento de usabilidade na timeline e nos viewers
+- acabamento de usabilidade nos viewers

@@ -22,12 +22,13 @@ private:
         std::unique_ptr<ImageTexture> texture;
     };
 
-    void DrawStackTimeline(AppContext& context,
-                           const char* label,
-                           StackModel& stack,
-                           int& activeIndex,
-                           int& timelineOffset,
-                           int normalizedOffset);
+    // Returns the content width used by this row (for shared scrollbar sizing)
+    float DrawStackTimeline(AppContext& context,
+                            const char* label,
+                            StackModel& stack,
+                            int& activeIndex,
+                            int& timelineOffset,
+                            int normalizedOffset);
     ImageTexture* GetOrCreateThumbnail(const SliceRecord& slice);
 
     ImageLoader m_imageLoader;

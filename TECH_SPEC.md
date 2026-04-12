@@ -124,15 +124,16 @@ Controles adicionais:
 - reset de viewport
 - sincronizacao opcional de viewport entre paineis
 
-## 6.3 Timeline dupla
+## 6.3 Timeline unificada
 
-A timeline deve ser inspirada no modulo de animacao do Krita, adaptada para sequencias de imagens medicas/fotograficas.
+A timeline e inspirada no modulo de animacao do Krita, adaptada para sequencias de imagens medicas/fotograficas.
 
 Requisitos:
 
-- uma faixa horizontal para cada pilha
-- cada slice representado como uma celula navegavel
-- miniaturas opcionais ou indicadores compactos
+- as duas faixas horizontais (Stack A e Stack B) exibidas em um unico painel rolavel
+- barra de rolagem horizontal compartilhada — ambas as pilhas deslocam juntas
+- separador visual entre as duas faixas
+- cada slice representado como uma celula navegavel com miniatura
 - destaque visual para:
   - slice atual
   - slices pareados
@@ -140,10 +141,17 @@ Requisitos:
   - slices alinhados
   - slices suspeitos
   - slices ajustados manualmente
-- controle visual do offset global entre pilhas
-- arraste horizontal para deslocar uma pilha em relacao a outra
-- navegação por teclado e mouse
-- selecao direta de um slice para inspeção
+- controle visual do offset global entre pilhas via drag strip independente por faixa
+- arraste horizontal em cada drag strip para deslocar aquela pilha em relacao a outra
+- selecao direta de um slice para inspecao, com sincronizacao automatica da pilha oposta
+
+Implementacao atual (`TimelinePanel`):
+
+- `Draw()` cria um `BeginChild("Timelines")` unico com `ImGuiWindowFlags_HorizontalScrollbar`
+- `DrawStackTimeline()` renderiza uma faixa (drag strip + miniaturas) inline, sem child proprio
+- offset normalizado por faixa aplicado via `SetCursorPosX` no espaco de coordenadas do scroll compartilhado
+- `Dummy` com largura maxima das duas faixas garante que o scrollbar cubra a mais larga
+- miniaturas com lazy loading por janela de visibilidade calculada a partir de `GetScrollX()`
 
 ## 6.4 Controle de DPI e escala da UI
 
@@ -269,6 +277,28 @@ No futuro, o pairing pode incorporar:
 - deteccao semi-automatica do offset ideal
 
 ## 9. Pipeline de Alinhamento
+
+### 9.0 Implementacao atual do motor de registro
+
+O motor implementado em `RegistrationEngine` realiza busca em grade 4D coarse-to-fine sobre os parametros de transformacao de similaridade (tx, ty, theta, scale).
+
+**Algoritmo:**
+
+1. extracao de mascara por modalidade (CT: threshold + morfologia; foto: HSV + inversao de fundo azul)
+2. estimativa inicial a partir de centroide, bounding box e eixo principal da mascara
+3. refinamento em tres niveis com passos decrescentes: coarse (16 px), medio (8 px), fino (3 px)
+4. por nivel: avaliacao de ate 80 candidatos vizinhos (3^4 - 1), retendo o melhor; repete ate estagnar
+
+**Funcao de custo:** 70% IoU de mascaras + 30% concordancia de gradiente Sobel normalizado.
+
+**Otimizacoes de desempenho implementadas (abril 2026):**
+
+- `LevelData`: dados da imagem de referencia (norma de gradiente, area da mascara) pre-computados uma vez por chamada, nao por candidato
+- piramide de resolucao: nivel coarse usa imagens em 1/4, medio em 1/2, fino em resolucao completa
+- early exit: se o score de mascara for menor que 0.05, o calculo de gradiente (custoso) e pulado
+- avaliacao paralela dos candidatos com `std::for_each(std::execution::par_unseq, ...)`
+- `cv::moments()` calculado uma unica vez em `ComputeMaskStats`
+- structuring elements morfologicos como `static const`
 
 ## 9.1 Etapa 1 - Ingestao e padronizacao
 
