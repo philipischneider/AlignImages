@@ -5,14 +5,39 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <ctime>
 #include <execution>
+#include <sstream>
 #include <vector>
 
 namespace align
 {
 namespace
 {
+
+// ============================================================
+// Timestamp helper
+// ============================================================
+
+std::string GetTimestamp()
+{
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t t = std::chrono::system_clock::to_time_t(now);
+    std::tm tm{};
+    localtime_s(&tm, &t);
+    char buf[20];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm);
+    return buf;
+}
+
+std::string FormatLogEntry(const std::string& ts, const std::string& operation, double score)
+{
+    std::ostringstream oss;
+    oss << ts << " " << operation << " score=" << std::to_string(score).substr(0, 6);
+    return oss.str();
+}
 
 // ============================================================
 // Mask statistics
@@ -127,6 +152,40 @@ Transform2D InvertSimilarityTransform(double scale, double theta, double tx, dou
     return transform;
 }
 
+// Affine similarity with independent X/Y scale (scaled rotation, no shear).
+// Matrix:  [ sx*cos(θ)  -sy*sin(θ)  tx ]
+//          [ sx*sin(θ)   sy*cos(θ)  ty ]
+Transform2D BuildAffineTransform(double sx, double sy, double theta, double tx, double ty)
+{
+    const double c = std::cos(theta);
+    const double s = std::sin(theta);
+    Transform2D t;
+    t.matrix = {
+        sx * c, -sy * s, tx,
+        sx * s,  sy * c, ty,
+        0.0, 0.0, 1.0
+    };
+    return t;
+}
+
+Transform2D InvertAffineTransform(double sx, double sy, double theta, double tx, double ty)
+{
+    const double safeSx = std::abs(sx) < 1e-6 ? 1.0 : sx;
+    const double safeSy = std::abs(sy) < 1e-6 ? 1.0 : sy;
+    const double c = std::cos(theta);
+    const double s = std::sin(theta);
+    // Inverse of [sx*c, -sy*s; sx*s, sy*c] is [c/sx, s/sx; -s/sy, c/sy]
+    const double txInv = -(c * tx + s * ty) / safeSx;
+    const double tyInv =  (s * tx - c * ty) / safeSy;
+    Transform2D t;
+    t.matrix = {
+         c / safeSx,  s / safeSx, txInv,
+        -s / safeSy,  c / safeSy, tyInv,
+        0.0, 0.0, 1.0
+    };
+    return t;
+}
+
 void ComputeInitialGuess(const MaskStats& movingStats,
                          const MaskStats& fixedStats,
                          double& scale,
@@ -143,6 +202,45 @@ void ComputeInitialGuess(const MaskStats& movingStats,
     const double sinTheta = std::sin(theta) * scale;
     tx = fixedStats.center.x - (cosTheta * movingStats.center.x - sinTheta * movingStats.center.y);
     ty = fixedStats.center.y - (sinTheta * movingStats.center.x + cosTheta * movingStats.center.y);
+}
+
+// Affine initial guess: independent bounding-box scale per axis.
+// Falls back to area-based uniform scale when the axis ratio is too close to 1.
+void ComputeInitialGuessAffine(const MaskStats& movingStats,
+                                const MaskStats& fixedStats,
+                                double& sx,
+                                double& sy,
+                                double& theta,
+                                double& tx,
+                                double& ty)
+{
+    const double movingW = movingStats.bounds.width  > 0 ? static_cast<double>(movingStats.bounds.width)  : 1.0;
+    const double movingH = movingStats.bounds.height > 0 ? static_cast<double>(movingStats.bounds.height) : 1.0;
+    const double fixedW  = fixedStats.bounds.width   > 0 ? static_cast<double>(fixedStats.bounds.width)   : 1.0;
+    const double fixedH  = fixedStats.bounds.height  > 0 ? static_cast<double>(fixedStats.bounds.height)  : 1.0;
+
+    const double sxBB = std::clamp(fixedW / movingW, 0.3, 3.5);
+    const double syBB = std::clamp(fixedH / movingH, 0.3, 3.5);
+    const double ratio = (std::max)(sxBB, syBB) / (std::max)((std::min)(sxBB, syBB), 0.01);
+
+    if (ratio < 1.15)
+    {
+        // Nearly uniform — use area-based uniform scale for stability
+        const double movingSize = (std::max)(movingW, movingH);
+        const double fixedSize  = (std::max)(fixedW,  fixedH);
+        sx = sy = std::clamp(fixedSize / movingSize, 0.3, 3.5);
+    }
+    else
+    {
+        sx = sxBB;
+        sy = syBB;
+    }
+
+    theta = NormalizeAngle(fixedStats.angle - movingStats.angle);
+    const double c = std::cos(theta);
+    const double s = std::sin(theta);
+    tx = fixedStats.center.x - (sx * c * movingStats.center.x - sy * s * movingStats.center.y);
+    ty = fixedStats.center.y - (sx * s * movingStats.center.x + sy * c * movingStats.center.y);
 }
 
 // ============================================================
@@ -388,6 +486,118 @@ void RefineParameters(const std::array<LevelData, 3>& levels,
 }
 
 // ============================================================
+// Affine refinement — 5D grid search (tx, ty, theta, sx, sy)
+// ============================================================
+
+void RefineParametersAffine(const std::array<LevelData, 3>& levels,
+                             double& sx,
+                             double& sy,
+                             double& theta,
+                             double& tx,
+                             double& ty,
+                             std::vector<IterationRecord>& iterations,
+                             double& bestScore)
+{
+    struct StepConfig
+    {
+        double txStep;
+        double tyStep;
+        double thetaStep;
+        double scaleStep;  // applied independently to sx and sy
+        int    levelIndex;
+    };
+
+    constexpr double kPi = 3.14159265358979323846;
+    const std::array<StepConfig, 3> steps {{
+        {16.0, 16.0, 6.0 * kPi / 180.0, 0.08,  0},
+        { 8.0,  8.0, 3.0 * kPi / 180.0, 0.04,  1},
+        { 3.0,  3.0, 1.0 * kPi / 180.0, 0.015, 2}
+    }};
+
+    struct Candidate
+    {
+        double sx;
+        double sy;
+        double theta;
+        double tx;
+        double ty;
+        double score = -1.0;
+    };
+
+    for (const StepConfig& step : steps)
+    {
+        const LevelData& level = levels[static_cast<std::size_t>(step.levelIndex)];
+
+        bool improved = true;
+        while (improved)
+        {
+            improved = false;
+
+            // 3^5 - 1 = 242 candidates (tx, ty, theta, sx, sy each ∈ {-1,0,+1})
+            std::vector<Candidate> candidates;
+            candidates.reserve(242);
+
+            for (int sxOffset = -1; sxOffset <= 1; ++sxOffset)
+            for (int syOffset = -1; syOffset <= 1; ++syOffset)
+            for (int thetaOffset = -1; thetaOffset <= 1; ++thetaOffset)
+            for (int tyOffset = -1; tyOffset <= 1; ++tyOffset)
+            for (int txOffset = -1; txOffset <= 1; ++txOffset)
+            {
+                if (sxOffset == 0 && syOffset == 0 && thetaOffset == 0 &&
+                    tyOffset  == 0 && txOffset  == 0)
+                    continue;
+
+                candidates.push_back({
+                    (std::max)(0.1, sx + step.scaleStep * static_cast<double>(sxOffset)),
+                    (std::max)(0.1, sy + step.scaleStep * static_cast<double>(syOffset)),
+                    NormalizeAngle(theta + step.thetaStep * static_cast<double>(thetaOffset)),
+                    tx + step.txStep * static_cast<double>(txOffset),
+                    ty + step.tyStep * static_cast<double>(tyOffset),
+                    -1.0
+                });
+            }
+
+            std::for_each(std::execution::par_unseq, candidates.begin(), candidates.end(),
+                [&level](Candidate& c)
+                {
+                    const Transform2D t = BuildAffineTransform(
+                        c.sx, c.sy, c.theta,
+                        c.tx * level.coordScale,
+                        c.ty * level.coordScale);
+                    c.score = ComputeCombinedScore(level, t);
+                });
+
+            const auto best = std::max_element(
+                candidates.begin(), candidates.end(),
+                [](const Candidate& a, const Candidate& b) { return a.score < b.score; });
+
+            if (best != candidates.end() && best->score > bestScore)
+            {
+                sx        = best->sx;
+                sy        = best->sy;
+                theta     = best->theta;
+                tx        = best->tx;
+                ty        = best->ty;
+                bestScore = best->score;
+                improved  = true;
+
+                IterationRecord rec;
+                rec.index     = static_cast<int>(iterations.size());
+                rec.score     = bestScore;
+                rec.tx        = tx;
+                rec.ty        = ty;
+                rec.theta     = theta;
+                rec.scale     = (sx + sy) * 0.5;  // geometric mean for display
+                rec.sx        = sx;
+                rec.sy        = sy;
+                rec.converged = false;
+                iterations.push_back(rec);
+            }
+        }
+    }
+}
+
+// ============================================================
 // Shared setup for both public entry points
 // ============================================================
 
@@ -411,7 +621,8 @@ std::array<LevelData, 3> BuildPyramid(const cv::Mat& movingMask,
 
 Result RegistrationEngine::RegisterCtToPhoto(const cv::Mat& movingImage,
                                              const cv::Mat& fixedImage,
-                                             RegistrationResult& result) const
+                                             RegistrationResult& result,
+                                             bool useAffine) const
 {
     if (movingImage.empty() || fixedImage.empty())
         return Result{false, "Images must be loaded before registration."};
@@ -424,30 +635,55 @@ Result RegistrationEngine::RegisterCtToPhoto(const cv::Mat& movingImage,
     if (!ComputeMaskStats(movingMask, movingStats) || !ComputeMaskStats(fixedMask, fixedStats))
         return Result{false, "Could not extract a usable body mask for registration."};
 
-    double scale = 1.0;
-    double theta = 0.0;
-    double tx    = 0.0;
-    double ty    = 0.0;
-    ComputeInitialGuess(movingStats, fixedStats, scale, theta, tx, ty);
-
     const std::array<LevelData, 3> levels = BuildPyramid(movingMask, fixedMask, movingImage, fixedImage);
-
-    result.transformType = "similarity";
     result.iterations.clear();
 
-    result.forward = BuildSimilarityTransform(scale, theta, tx, ty);
-    double bestScore = ComputeCombinedScore(levels[2], result.forward);
-    result.iterations.push_back({0, bestScore, tx, ty, theta, scale, false});
+    double bestScore = 0.0;
+    const std::string ts = GetTimestamp();
 
-    RefineParameters(levels, scale, theta, tx, ty, result.iterations, bestScore);
+    if (useAffine)
+    {
+        double sx = 1.0, sy = 1.0, theta = 0.0, tx = 0.0, ty = 0.0;
+        ComputeInitialGuessAffine(movingStats, fixedStats, sx, sy, theta, tx, ty);
 
-    result.forward   = BuildSimilarityTransform(scale, theta, tx, ty);
-    result.inverse   = InvertSimilarityTransform(scale, theta, tx, ty);
+        result.transformType = "affine";
+        result.forward = BuildAffineTransform(sx, sy, theta, tx, ty);
+        bestScore = ComputeCombinedScore(levels[2], result.forward);
+        IterationRecord init;
+        init.index = 0; init.score = bestScore; init.tx = tx; init.ty = ty;
+        init.theta = theta; init.scale = (sx + sy) * 0.5; init.sx = sx; init.sy = sy;
+        result.iterations.push_back(init);
+
+        RefineParametersAffine(levels, sx, sy, theta, tx, ty, result.iterations, bestScore);
+
+        result.forward = BuildAffineTransform(sx, sy, theta, tx, ty);
+        result.inverse = InvertAffineTransform(sx, sy, theta, tx, ty);
+    }
+    else
+    {
+        double scale = 1.0, theta = 0.0, tx = 0.0, ty = 0.0;
+        ComputeInitialGuess(movingStats, fixedStats, scale, theta, tx, ty);
+
+        result.transformType = "similarity";
+        result.forward = BuildSimilarityTransform(scale, theta, tx, ty);
+        bestScore = ComputeCombinedScore(levels[2], result.forward);
+        result.iterations.push_back({0, bestScore, tx, ty, theta, scale, false});
+
+        RefineParameters(levels, scale, theta, tx, ty, result.iterations, bestScore);
+
+        result.forward = BuildSimilarityTransform(scale, theta, tx, ty);
+        result.inverse = InvertSimilarityTransform(scale, theta, tx, ty);
+    }
+
     result.score     = bestScore;
     result.converged = true;
-
     if (!result.iterations.empty())
         result.iterations.back().converged = true;
+
+    result.timestamp        = ts;
+    result.algorithmVersion = useAffine ? "affine_v1" : "similarity_v1";
+    result.operationLog.push_back(
+        FormatLogEntry(ts, "initial_auto [" + result.transformType + "]", bestScore));
 
     return Result{};
 }
@@ -458,43 +694,73 @@ Result RegistrationEngine::RefineCtToPhotoFromPrior(const cv::Mat& movingImage,
                                                     double priorTy,
                                                     double priorTheta,
                                                     double priorScale,
-                                                    RegistrationResult& result) const
+                                                    RegistrationResult& result,
+                                                    bool useAffine,
+                                                    double priorSx,
+                                                    double priorSy) const
 {
     if (movingImage.empty() || fixedImage.empty())
         return Result{false, "Images must be loaded before refinement."};
 
     const cv::Mat movingMask = ExtractCtMask(movingImage);
     const cv::Mat fixedMask  = ExtractPhotoMask(fixedImage);
-
-    result.transformType = "similarity_prior_refined";
+    const std::array<LevelData, 3> levels = BuildPyramid(movingMask, fixedMask, movingImage, fixedImage);
     result.iterations.clear();
 
-    double scale = priorScale;
-    double theta = priorTheta;
-    double tx    = priorTx;
-    double ty    = priorTy;
+    double bestScore = 0.0;
+    const std::string ts = GetTimestamp();
 
-    const std::array<LevelData, 3> levels = BuildPyramid(movingMask, fixedMask, movingImage, fixedImage);
+    if (useAffine)
+    {
+        // Resolve affine priors — fall back to priorScale if affine priors not available
+        const double startSx = priorSx > 0.0 ? priorSx : priorScale;
+        const double startSy = priorSy > 0.0 ? priorSy : priorScale;
+        double sx = startSx, sy = startSy, theta = priorTheta, tx = priorTx, ty = priorTy;
 
-    result.forward = BuildSimilarityTransform(scale, theta, tx, ty);
-    double bestScore = ComputeCombinedScore(levels[2], result.forward);
-    result.iterations.push_back({0, bestScore, tx, ty, theta, scale, false});
+        result.transformType = "affine_prior_refined";
+        result.forward = BuildAffineTransform(sx, sy, theta, tx, ty);
+        bestScore = ComputeCombinedScore(levels[2], result.forward);
+        IterationRecord init;
+        init.index = 0; init.score = bestScore; init.tx = tx; init.ty = ty;
+        init.theta = theta; init.scale = (sx + sy) * 0.5; init.sx = sx; init.sy = sy;
+        result.iterations.push_back(init);
 
-    RefineParameters(levels, scale, theta, tx, ty, result.iterations, bestScore);
+        RefineParametersAffine(levels, sx, sy, theta, tx, ty, result.iterations, bestScore);
 
-    result.forward           = BuildSimilarityTransform(scale, theta, tx, ty);
-    result.inverse           = InvertSimilarityTransform(scale, theta, tx, ty);
-    result.score             = bestScore;
-    result.converged         = true;
-    result.refinedWithPrior  = true;
+        result.forward = BuildAffineTransform(sx, sy, theta, tx, ty);
+        result.inverse = InvertAffineTransform(sx, sy, theta, tx, ty);
+    }
+    else
+    {
+        double scale = priorScale, theta = priorTheta, tx = priorTx, ty = priorTy;
+
+        result.transformType = "similarity_prior_refined";
+        result.forward = BuildSimilarityTransform(scale, theta, tx, ty);
+        bestScore = ComputeCombinedScore(levels[2], result.forward);
+        result.iterations.push_back({0, bestScore, tx, ty, theta, scale, false});
+
+        RefineParameters(levels, scale, theta, tx, ty, result.iterations, bestScore);
+
+        result.forward = BuildSimilarityTransform(scale, theta, tx, ty);
+        result.inverse = InvertSimilarityTransform(scale, theta, tx, ty);
+    }
+
+    result.score              = bestScore;
+    result.converged          = true;
+    result.refinedWithPrior   = true;
     result.hasConvergencePrior = true;
-    result.priorTx           = priorTx;
-    result.priorTy           = priorTy;
-    result.priorTheta        = priorTheta;
-    result.priorScale        = priorScale;
+    result.priorTx            = priorTx;
+    result.priorTy            = priorTy;
+    result.priorTheta         = priorTheta;
+    result.priorScale         = priorScale;
 
     if (!result.iterations.empty())
         result.iterations.back().converged = true;
+
+    result.timestamp        = ts;
+    result.algorithmVersion = useAffine ? "affine_v1" : "similarity_v1";
+    result.operationLog.push_back(
+        FormatLogEntry(ts, "prior_refined [" + result.transformType + "]", bestScore));
 
     return Result{};
 }

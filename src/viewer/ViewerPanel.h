@@ -46,6 +46,7 @@ private:
     double m_loadedTy = 0.0;
     double m_loadedTheta = 0.0;
     double m_loadedScale = 1.0;
+    float m_lastFitScale = 1.0f;
     ImageLoader m_imageLoader;
     ImageTexture m_texture;
     std::string m_statusText = "No image loaded.";

@@ -14,6 +14,8 @@ struct Parameters
     double ty = 0.0;
     double theta = 0.0;
     double scale = 1.0;
+    double sx = -1.0;  // -1 = not available (similarity result)
+    double sy = -1.0;
 };
 
 Parameters ExtractParameters(const RegistrationResult& registration)
@@ -22,10 +24,12 @@ Parameters ExtractParameters(const RegistrationResult& registration)
     if (!registration.iterations.empty())
     {
         const IterationRecord& iteration = registration.iterations.back();
-        parameters.tx = iteration.tx;
-        parameters.ty = iteration.ty;
+        parameters.tx    = iteration.tx;
+        parameters.ty    = iteration.ty;
         parameters.theta = iteration.theta;
         parameters.scale = iteration.scale;
+        parameters.sx    = iteration.sx;
+        parameters.sy    = iteration.sy;
     }
     return parameters;
 }
@@ -61,6 +65,8 @@ void ConvergenceAnalyzer::Analyze(std::vector<RegistrationResult>& registrations
         std::vector<double> tyValues;
         std::vector<double> thetaValues;
         std::vector<double> scaleValues;
+        std::vector<double> sxValues;
+        std::vector<double> syValues;
 
         for (int offset = -kWindowRadius; offset <= kWindowRadius; ++offset)
         {
@@ -75,14 +81,19 @@ void ConvergenceAnalyzer::Analyze(std::vector<RegistrationResult>& registrations
             tyValues.push_back(params.ty);
             thetaValues.push_back(params.theta);
             scaleValues.push_back(params.scale);
+            if (params.sx > 0.0) sxValues.push_back(params.sx);
+            if (params.sy > 0.0) syValues.push_back(params.sy);
         }
 
         RegistrationResult& registration = registrations[i];
         registration.hasConvergencePrior = !txValues.empty();
-        registration.priorTx = Median(txValues);
-        registration.priorTy = Median(tyValues);
+        registration.priorTx    = Median(txValues);
+        registration.priorTy    = Median(tyValues);
         registration.priorTheta = Median(thetaValues);
         registration.priorScale = Median(scaleValues);
+        // Affine priors — only set when affine data is available in the window
+        registration.priorSx = sxValues.empty() ? -1.0 : Median(sxValues);
+        registration.priorSy = syValues.empty() ? -1.0 : Median(syValues);
 
         const Parameters current = ExtractParameters(registration);
         const double translationDelta = std::sqrt(

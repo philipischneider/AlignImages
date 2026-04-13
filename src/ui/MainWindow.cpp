@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <future>
 #include <mutex>
+#include <numeric>
 #include <string>
 
 namespace align
@@ -204,6 +205,57 @@ const char* PreviewModeLabel(PreviewMode mode)
         return "Blend";
     }
 }
+
+void ShowHoveredHelp(const char* description)
+{
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort) && description != nullptr)
+    {
+        ImGui::BeginTooltip();
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28.0f);
+        ImGui::TextUnformatted(description);
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+    }
+}
+
+void TextWithHelp(const char* label, const char* description)
+{
+    ImGui::TextUnformatted(label);
+    ShowHoveredHelp(description);
+}
+
+std::string BuildSnapshotLabel(const RegistrationResult& registration)
+{
+    if (!registration.timestamp.empty())
+    {
+        return registration.timestamp + "  " + registration.transformType;
+    }
+
+    return registration.transformType.empty() ? "operation" : registration.transformType;
+}
+
+const PairRecord* GetSelectedPair(const AppContext& context)
+{
+    const int activeSliceA = context.session.projectPreferences.activeSliceA;
+    if (activeSliceA < 0 || activeSliceA >= static_cast<int>(context.session.pairing.pairs.size()))
+    {
+        return nullptr;
+    }
+
+    const PairRecord& pair = context.session.pairing.pairs[activeSliceA];
+    return pair.valid ? &pair : nullptr;
+}
+
+const RegistrationResult* FindSelectedRegistration(const AppContext& context)
+{
+    const PairRecord* pair = GetSelectedPair(context);
+    if (pair == nullptr)
+    {
+        return nullptr;
+    }
+
+    return FindRegistrationResult(context.session.registrations, pair->fixedIndex, pair->movingIndex);
+}
 } // namespace
 
 void MainWindow::Draw(AppContext& context, GLFWwindow* window)
@@ -310,6 +362,27 @@ void MainWindow::DrawMenuBar(AppContext& context)
 
 void MainWindow::DrawLeftPanel(AppContext& context, GLFWwindow* window)
 {
+    // ---- Workflow phase banner ----
+    static const ImVec4 kPhaseColors[] = {
+        {0.55f, 0.55f, 0.55f, 1.0f},  // Setup
+        {0.25f, 0.60f, 1.00f, 1.0f},  // Initial Alignment
+        {0.65f, 0.35f, 1.00f, 1.0f},  // Convergence Analysis
+        {1.00f, 0.65f, 0.10f, 1.0f},  // Prior Refinement
+        {1.00f, 0.35f, 0.55f, 1.0f},  // Manual Refinement
+        {0.20f, 0.80f, 0.35f, 1.0f},  // Export
+    };
+    static const char* kPhaseLabels[] = {
+        "Setup",
+        "Initial Alignment",
+        "Convergence Analysis",
+        "Prior Refinement",
+        "Manual Refinement",
+        "Export",
+    };
+    const int phaseIdx = static_cast<int>(context.session.workflowPhase);
+    ImGui::TextColored(kPhaseColors[phaseIdx], "[ %s ]", kPhaseLabels[phaseIdx]);
+    ImGui::Separator();
+
     ImGui::TextUnformatted("Project");
     InputTextString("Session Name", context.session.projectName);
     ImGui::Separator();
@@ -355,15 +428,35 @@ void MainWindow::DrawLeftPanel(AppContext& context, GLFWwindow* window)
     {
         context.session.projectPreferences.refinementMethod = kRefinementMethodValues[refinementMethodIndex];
     }
-    InputTextString("Transform", context.session.projectPreferences.transformType);
+    // Transform type — radio buttons instead of freeform text
+    {
+        const bool isSimilarity = context.session.projectPreferences.transformType != "affine";
+        if (ImGui::RadioButton("Similarity", isSimilarity))
+            context.session.projectPreferences.transformType = "similarity";
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Affine", !isSimilarity))
+            context.session.projectPreferences.transformType = "affine";
+        if (!isSimilarity)
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f),
+                               "Affine: independent X/Y scale. Use when modalities have different aspect ratios.");
+    }
     ImGui::TextWrapped("%s", DescribeCurrentAutomaticPipeline(context.session.projectPreferences));
     ImGui::SliderInt("Max Iterations", &context.session.projectPreferences.maxIterations, 1, 250);
     ImGui::SliderInt("Coarse Levels", &context.session.projectPreferences.coarseLevels, 1, 6);
     ImGui::Checkbox("Use Alignment In Preview", &context.session.projectPreferences.useAlignmentPreview);
-    if (ImGui::Button("Run Current Alignment"))
+    ShowHoveredHelp("When enabled, the preview viewer composites the moving image after applying the current alignment or selected history snapshot.");
+    TextWithHelp("Registration Actions", "Run a single alignment, process the full stack, export results, or enter manual landmark editing.");
+    if (!m_currentAlignmentTask.has_value() && ImGui::Button("Run Current Alignment"))
     {
         RunCurrentAlignment(context);
     }
+    else if (m_currentAlignmentTask.has_value())
+    {
+        ImGui::BeginDisabled();
+        ImGui::Button("Run Current Alignment");
+        ImGui::EndDisabled();
+    }
+    ShowHoveredHelp("Runs the active pair in the background so the interface stays responsive.");
     ImGui::SameLine();
     if (!context.batchProcessState.running && ImGui::Button("Run Batch Alignment"))
     {
@@ -384,18 +477,86 @@ void MainWindow::DrawLeftPanel(AppContext& context, GLFWwindow* window)
     {
         ExportBatchAligned(context);
     }
-    if (ImGui::Button("Apply Manual Landmarks"))
+    if (ImGui::Button(context.landmarkModeEnabled ? "Disable Landmark Mode" : "Enable Landmark Mode"))
     {
-        ApplyManualLandmarks(context);
+        context.landmarkModeEnabled = !context.landmarkModeEnabled;
+        if (!context.landmarkModeEnabled)
+        {
+            context.pendingLandmarkPoint.hasMovingPoint = false;
+            context.landmarkEditState.selectedIndex = -1;
+            context.landmarkEditState.target = LandmarkEditTarget::None;
+            context.landmarkEditState.isDragging = false;
+            m_lastMessage = "Landmark mode disabled.";
+        }
+        else
+        {
+            context.session.projectPreferences.useAlignmentPreview = true;
+            m_lastMessage = "Landmark mode enabled. Click a point in Stack B, then the matching point in Stack A.";
+        }
+    }
+    if (context.landmarkModeEnabled)
+    {
+        ImGui::TextWrapped("Landmark mode is active. The preview updates in real time as soon as at least 2 pairs exist.");
     }
     if (ImGui::Button("Analyze Convergence"))
     {
         AnalyzeConvergence(context);
     }
     ImGui::SameLine();
-    if (ImGui::Button("Run Prior Refinement"))
+    if (m_priorRefinementTask.has_value())
     {
-        RunPriorRefinement(context);
+        if (ImGui::Button("Cancel Refinement"))
+        {
+            CancelPriorRefinement();
+        }
+        if (m_priorRefinementProgress != nullptr)
+        {
+            const int attempted = m_priorRefinementProgress->attempted.load();
+            const int total     = m_priorRefinementProgress->total.load();
+            const float frac    = total > 0 ? static_cast<float>(attempted) / static_cast<float>(total) : 0.0f;
+            ImGui::ProgressBar(frac, ImVec2(-1.0f, 0.0f));
+            ImGui::Text("Refinement: %d / %d", attempted, total);
+            std::string status;
+            {
+                std::scoped_lock lock(m_priorRefinementProgress->statusMutex);
+                status = m_priorRefinementProgress->statusMessage;
+            }
+            if (!status.empty())
+            {
+                ImGui::TextWrapped("%s", status.c_str());
+            }
+        }
+    }
+    else
+    {
+        if (ImGui::Button("Run Prior Refinement"))
+        {
+            RunPriorRefinement(context);
+        }
+    }
+    if (m_exportBatchTask.has_value())
+    {
+        if (ImGui::Button("Cancel Export"))
+        {
+            CancelExportBatch();
+        }
+        if (m_exportBatchProgress != nullptr)
+        {
+            const int attempted = m_exportBatchProgress->attempted.load();
+            const int total     = m_exportBatchProgress->total.load();
+            const float frac    = total > 0 ? static_cast<float>(attempted) / static_cast<float>(total) : 0.0f;
+            ImGui::ProgressBar(frac, ImVec2(-1.0f, 0.0f));
+            ImGui::Text("Export: %d / %d", attempted, total);
+            std::string status;
+            {
+                std::scoped_lock lock(m_exportBatchProgress->statusMutex);
+                status = m_exportBatchProgress->statusMessage;
+            }
+            if (!status.empty())
+            {
+                ImGui::TextWrapped("%s", status.c_str());
+            }
+        }
     }
     if (context.batchProcessState.running)
     {
@@ -462,11 +623,15 @@ void MainWindow::DrawLeftPanel(AppContext& context, GLFWwindow* window)
 
 void MainWindow::DrawRightPanel(AppContext& context)
 {
-    ImGui::TextUnformatted("Diagnostics");
+    TextWithHelp("Diagnostics", "Quick summary of loaded data, pairing status, current registration quality, and stack-level metrics.");
     ImGui::Text("Stack A slices: %d", static_cast<int>(context.session.stackA.slices.size()));
+    ShowHoveredHelp("Total number of reference frames currently loaded into Stack A.");
     ImGui::Text("Stack B slices: %d", static_cast<int>(context.session.stackB.slices.size()));
+    ShowHoveredHelp("Total number of moving frames currently loaded into Stack B.");
     ImGui::Text("Global Offset: %d", context.session.pairing.globalOffset);
+    ShowHoveredHelp("Pairing offset applied between Stack B and Stack A in the timeline.");
     ImGui::Text("Preview: %s", PreviewModeLabel(context.session.uiPreferences.previewMode));
+    ShowHoveredHelp("Current compositing mode used by the preview viewer.");
     ImGui::Text("Auto Method: %s", context.session.projectPreferences.autoAlignmentMethod.c_str());
     ImGui::Text("Mask Strategy: %s", context.session.projectPreferences.maskMethod.c_str());
     ImGui::Text("Score Strategy: %s", context.session.projectPreferences.scoreMethod.c_str());
@@ -476,29 +641,32 @@ void MainWindow::DrawRightPanel(AppContext& context)
     ImGui::Text("Registrations: %d", static_cast<int>(context.session.registrations.size()));
     ImGui::Separator();
 
-    ImGui::TextUnformatted("Batch Summary");
+    TextWithHelp("Batch Summary", "Aggregate status across all valid pairs after automatic or manual processing.");
     ImGui::Text("Attempted: %d", summary.attempted);
+    ShowHoveredHelp("How many valid pairs have been processed or at least assigned a status.");
     ImGui::Text("Succeeded: %d", summary.succeeded);
+    ShowHoveredHelp("Pairs currently marked as aligned successfully.");
     ImGui::Text("Failed: %d", summary.failed);
+    ShowHoveredHelp("Pairs currently marked as suspect or failed.");
     ImGui::Text("Batch Running: %s", context.batchProcessState.running ? "yes" : "no");
     if (summary.hasScores)
     {
         ImGui::Text("Average Score: %.4f", summary.averageScore);
+        ShowHoveredHelp("Mean registration score across stored results.");
         ImGui::Text("Best Score: %.4f", summary.bestScore);
+        ShowHoveredHelp("Highest registration score across stored results.");
         ImGui::Text("Worst Score: %.4f", summary.worstScore);
+        ShowHoveredHelp("Lowest registration score across stored results.");
     }
     ImGui::Separator();
 
-    ImGui::TextUnformatted("Current Selection");
+    TextWithHelp("Current Selection", "The pair currently selected in the shared timeline.");
     ImGui::Text("Reference Slice A: %d", context.session.projectPreferences.activeSliceA);
     ImGui::Text("Moving Slice B: %d", context.session.projectPreferences.activeSliceB);
     ImGui::Separator();
 
-    ImGui::TextUnformatted("Registration Status");
-    const RegistrationResult* registration = FindRegistrationResult(
-        context.session.registrations,
-        context.session.projectPreferences.activeSliceA,
-        context.session.projectPreferences.activeSliceB);
+    TextWithHelp("Registration Status", "State of the active pair, including transform type, score, manual status, and convergence-derived flags.");
+    const RegistrationResult* registration = FindSelectedRegistration(context);
     if (registration == nullptr)
     {
         ImGui::TextWrapped("No registration has been computed for the current pair.");
@@ -520,12 +688,25 @@ void MainWindow::DrawRightPanel(AppContext& context)
         if (!registration->iterations.empty())
         {
             const IterationRecord& iteration = registration->iterations.back();
-            ImGui::Text("tx: %.2f", iteration.tx);
-            ImGui::Text("ty: %.2f", iteration.ty);
-            ImGui::Text("theta: %.2f deg", iteration.theta * 180.0 / 3.14159265358979323846);
-            ImGui::Text("scale: %.4f", iteration.scale);
+            ImGui::Text("tx: %.2f px", iteration.tx);
+            ImGui::Text("ty: %.2f px", iteration.ty);
+            ImGui::Text("theta: %.3f deg", iteration.theta * 180.0 / 3.14159265358979323846);
+            if (iteration.sx > 0.0 && iteration.sy > 0.0)
+            {
+                ImGui::Text("sx: %.4f  sy: %.4f", iteration.sx, iteration.sy);
+            }
+            else
+            {
+                ImGui::Text("scale: %.4f", iteration.scale);
+            }
         }
     }
+
+    ImGui::Separator();
+    DrawOperationHistory(context);
+
+    ImGui::Separator();
+    DrawMetricsGraph(context);
 }
 
 void SetBatchStatus(const std::shared_ptr<MainWindow::BatchTaskProgress>& progress, const std::string& message)
@@ -637,7 +818,7 @@ void MainWindow::DrawStackLoader(AppContext& context, StackModel& stack)
     ImGui::PopID();
 }
 
-void MainWindow::LoadStack(AppContext& context, StackModel& stack)
+void MainWindow::LoadStack(AppContext& /*context*/, StackModel& stack)
 {
     if (stack.directory.empty())
     {
@@ -669,6 +850,12 @@ void MainWindow::LoadStack(AppContext& context, StackModel& stack)
 
 void MainWindow::RunCurrentAlignment(AppContext& context)
 {
+    if (HasBackgroundTask())
+    {
+        m_lastMessage = "Wait for the current background task to finish before starting another alignment.";
+        return;
+    }
+
     if (context.session.projectPreferences.activeSliceA < 0 ||
         context.session.projectPreferences.activeSliceA >= static_cast<int>(context.session.pairing.pairs.size()))
     {
@@ -685,82 +872,94 @@ void MainWindow::RunCurrentAlignment(AppContext& context)
 
     const SliceRecord& fixedSlice = context.session.stackA.slices[pair.fixedIndex];
     const SliceRecord& movingSlice = context.session.stackB.slices[pair.movingIndex];
-
-    cv::Mat movingImage;
-    cv::Mat fixedImage;
-    Result loadMoving = m_imageLoader.LoadColorImage(movingSlice.filePath, movingImage);
-    Result loadFixed = m_imageLoader.LoadColorImage(fixedSlice.filePath, fixedImage);
-    if (!loadMoving.ok || !loadFixed.ok)
-    {
-        m_lastMessage = "Could not load the active pair for registration.";
-        return;
-    }
-
-    RegistrationResult computed;
-    computed.fixedIndex = pair.fixedIndex;
-    computed.movingIndex = pair.movingIndex;
-    Result registration;
-    if (context.session.projectPreferences.autoAlignmentMethod == "landmarks_only")
+    const bool useAffine = context.session.projectPreferences.transformType == "affine";
+    const std::string autoMethod = context.session.projectPreferences.autoAlignmentMethod;
+    const int pairListIndex = context.session.projectPreferences.activeSliceA;
+    const std::optional<RegistrationResult> existingCopy = [&, pair]()
+        -> std::optional<RegistrationResult>
     {
         RegistrationResult* existing =
             FindRegistrationResult(context.session.registrations, pair.fixedIndex, pair.movingIndex);
-        if (existing == nullptr || existing->landmarks.size() < 2)
+        if (existing != nullptr)
         {
-            m_lastMessage = "Landmarks Only requires at least 2 landmark pairs for the current selection.";
-            return;
+            return *existing;
         }
+        return std::nullopt;
+    }();
 
-        registration = m_landmarkRegistration.ComputeFromLandmarks(*existing);
-        if (!registration.ok)
+    m_backgroundStatus = "Running current alignment...";
+    m_currentAlignmentTask = std::async(
+        std::launch::async,
+        [fixedSlice, movingSlice, pair, pairListIndex, autoMethod, useAffine, existingCopy]()
         {
-            m_lastMessage = registration.message;
-            return;
-        }
+            CurrentAlignmentTaskResult taskResult;
+            taskResult.pairListIndex = pairListIndex;
+            taskResult.registration.fixedIndex = pair.fixedIndex;
+            taskResult.registration.movingIndex = pair.movingIndex;
 
-        existing->fixedIndex = pair.fixedIndex;
-        existing->movingIndex = pair.movingIndex;
-        existing->isManual = true;
-        PairRecord& mutablePair = context.session.pairing.pairs[context.session.projectPreferences.activeSliceA];
-        mutablePair.status = PairStatus::Manual;
-        m_lastMessage = "Manual landmark alignment applied to the current pair.";
-        return;
-    }
-    else if (context.session.projectPreferences.autoAlignmentMethod == "prior_refinement_only")
-    {
-        RegistrationResult* existing =
-            FindRegistrationResult(context.session.registrations, pair.fixedIndex, pair.movingIndex);
-        if (existing == nullptr || !existing->hasConvergencePrior)
-        {
-            m_lastMessage = "Prior Refinement Only requires an existing registration with convergence prior.";
-            return;
-        }
+            ImageLoader imageLoader;
+            RegistrationEngine registrationEngine;
+            LandmarkRegistration landmarkRegistration;
 
-        computed = *existing;
-        registration = m_registrationEngine.RefineCtToPhotoFromPrior(movingImage,
-                                                                     fixedImage,
-                                                                     existing->priorTx,
-                                                                     existing->priorTy,
-                                                                     existing->priorTheta,
-                                                                     existing->priorScale,
-                                                                     computed);
-    }
-    else
-    {
-        registration = m_registrationEngine.RegisterCtToPhoto(movingImage, fixedImage, computed);
-    }
-    if (!registration.ok)
-    {
-        m_lastMessage = registration.message;
-        return;
-    }
+            if (autoMethod == "landmarks_only")
+            {
+                if (!existingCopy.has_value() || existingCopy->landmarks.size() < 2)
+                {
+                    taskResult.result = Result{false, "Landmarks Only requires at least 2 landmark pairs for the current selection."};
+                    return taskResult;
+                }
 
-    StoreRegistrationResult(context, computed);
-    PairRecord& mutablePair = context.session.pairing.pairs[context.session.projectPreferences.activeSliceA];
-    mutablePair.status = computed.score >= 0.15 ? PairStatus::Aligned : PairStatus::Suspect;
+                taskResult.registration = *existingCopy;
+                taskResult.result = landmarkRegistration.ComputeFromLandmarks(taskResult.registration);
+                if (taskResult.result.ok)
+                {
+                    taskResult.registration.isManual = true;
+                    taskResult.pairStatus = PairStatus::Manual;
+                    taskResult.workflowPhase = WorkflowPhase::ManualRefinement;
+                }
+                return taskResult;
+            }
 
-    m_lastMessage = "Alignment computed for pair B:" + std::to_string(computed.movingIndex) +
-                    " -> A:" + std::to_string(computed.fixedIndex) +
-                    " with score " + std::to_string(computed.score);
+            cv::Mat movingImage;
+            cv::Mat fixedImage;
+            Result loadMoving = imageLoader.LoadColorImage(movingSlice.filePath, movingImage);
+            Result loadFixed = imageLoader.LoadColorImage(fixedSlice.filePath, fixedImage);
+            if (!loadMoving.ok || !loadFixed.ok)
+            {
+                taskResult.result = Result{false, "Could not load the active pair for registration."};
+                return taskResult;
+            }
+
+            if (autoMethod == "prior_refinement_only")
+            {
+                if (!existingCopy.has_value() || !existingCopy->hasConvergencePrior)
+                {
+                    taskResult.result = Result{false, "Prior Refinement Only requires an existing registration with convergence prior."};
+                    return taskResult;
+                }
+
+                taskResult.registration = *existingCopy;
+                taskResult.result = registrationEngine.RefineCtToPhotoFromPrior(
+                    movingImage, fixedImage,
+                    existingCopy->priorTx, existingCopy->priorTy, existingCopy->priorTheta, existingCopy->priorScale,
+                    taskResult.registration, useAffine, existingCopy->priorSx, existingCopy->priorSy);
+            }
+            else
+            {
+                taskResult.result = registrationEngine.RegisterCtToPhoto(
+                    movingImage, fixedImage, taskResult.registration, useAffine);
+            }
+
+            if (!taskResult.result.ok)
+            {
+                return taskResult;
+            }
+
+            taskResult.pairStatus = taskResult.registration.score >= 0.15 ? PairStatus::Aligned : PairStatus::Suspect;
+            return taskResult;
+        });
+
+    m_lastMessage = "Current alignment started.";
 }
 
 void MainWindow::RunBatchAlignment(AppContext& context)
@@ -785,6 +984,7 @@ void MainWindow::RunBatchAlignment(AppContext& context)
     const std::vector<SliceRecord> fixedSlices = context.session.stackA.slices;
     const std::vector<SliceRecord> movingSlices = context.session.stackB.slices;
     const std::string autoMethod = context.session.projectPreferences.autoAlignmentMethod;
+    const bool useAffine = context.session.projectPreferences.transformType == "affine";
     int totalValidPairs = 0;
     for (const PairRecord& pair : pairs)
     {
@@ -798,8 +998,9 @@ void MainWindow::RunBatchAlignment(AppContext& context)
     context.batchProcessState.statusMessage = "Preparing batch alignment...";
     SetBatchStatus(progress, "Preparing batch alignment...");
     m_batchTaskProgress = progress;
+    context.session.workflowPhase = WorkflowPhase::InitialAlignment;
     m_batchTask = std::async(std::launch::async,
-                             [pairs, registrations, fixedSlices, movingSlices, autoMethod, progress]()
+                             [pairs, registrations, fixedSlices, movingSlices, autoMethod, useAffine, progress]()
                              {
                                  BatchTaskResult taskResult;
                                  taskResult.pairs = pairs;
@@ -872,13 +1073,11 @@ void MainWindow::RunBatchAlignment(AppContext& context)
 
                                          computed = *existing;
                                          registration = registrationEngine.RefineCtToPhotoFromPrior(
-                                             movingImage,
-                                             fixedImage,
-                                             existing->priorTx,
-                                             existing->priorTy,
-                                             existing->priorTheta,
-                                             existing->priorScale,
-                                             computed);
+                                             movingImage, fixedImage,
+                                             existing->priorTx, existing->priorTy,
+                                             existing->priorTheta, existing->priorScale,
+                                             computed, useAffine,
+                                             existing->priorSx, existing->priorSy);
                                      }
                                      else if (autoMethod == "landmarks_only")
                                      {
@@ -898,7 +1097,8 @@ void MainWindow::RunBatchAlignment(AppContext& context)
                                      }
                                      else
                                      {
-                                         registration = registrationEngine.RegisterCtToPhoto(movingImage, fixedImage, computed);
+                                         registration = registrationEngine.RegisterCtToPhoto(
+                                             movingImage, fixedImage, computed, useAffine);
                                      }
 
                                      if (!registration.ok)
@@ -1026,68 +1226,143 @@ void MainWindow::ExportCurrentAligned(AppContext& context)
         return;
     }
 
+    context.session.workflowPhase = WorkflowPhase::Export;
     m_lastMessage = "Current pair exported to " + outputDir->string();
 }
 
 void MainWindow::ExportBatchAligned(AppContext& context)
 {
+    if (HasBackgroundTask())
+    {
+        m_lastMessage = "Wait for the current background task to finish before starting batch export.";
+        return;
+    }
+
     const auto outputDir = ShowSelectFolderDialog(L"Select Batch Export Folder");
     if (!outputDir.has_value())
     {
         return;
     }
 
-    int exported = 0;
+    std::vector<PairRecord>        pairs         = context.session.pairing.pairs;
+    std::vector<RegistrationResult> registrations = context.session.registrations;
+    const std::vector<SliceRecord>  fixedSlices   = context.session.stackA.slices;
+    const std::vector<SliceRecord>  movingSlices  = context.session.stackB.slices;
+    const std::filesystem::path     baseDir       = *outputDir;
 
-    for (const PairRecord& pair : context.session.pairing.pairs)
+    int total = 0;
+    for (const PairRecord& p : pairs)
     {
-        if (!pair.valid)
+        if (p.valid && FindRegistrationResult(registrations, p.fixedIndex, p.movingIndex) != nullptr)
         {
-            continue;
-        }
-
-        const RegistrationResult* registration =
-            FindRegistrationResult(context.session.registrations, pair.fixedIndex, pair.movingIndex);
-        if (registration == nullptr)
-        {
-            continue;
-        }
-
-        const SliceRecord& fixedSlice = context.session.stackA.slices[pair.fixedIndex];
-        const SliceRecord& movingSlice = context.session.stackB.slices[pair.movingIndex];
-
-        const std::filesystem::path baseDir = *outputDir;
-        const std::filesystem::path movingToFixedPath =
-            baseDir / "moving_to_fixed" /
-            ("B" + std::to_string(pair.movingIndex) + "_to_A" + std::to_string(pair.fixedIndex) + ".png");
-        const std::filesystem::path fixedToMovingPath =
-            baseDir / "fixed_to_moving" /
-            ("A" + std::to_string(pair.fixedIndex) + "_to_B" + std::to_string(pair.movingIndex) + ".png");
-
-        Result exportForward = m_exportController.ExportAlignedMovingToFixed(
-            movingSlice.filePath, fixedSlice.filePath, *registration, movingToFixedPath);
-        Result exportInverse = m_exportController.ExportAlignedFixedToMoving(
-            fixedSlice.filePath, movingSlice.filePath, *registration, fixedToMovingPath);
-        if (exportForward.ok && exportInverse.ok)
-        {
-            ++exported;
+            ++total;
         }
     }
 
-    m_lastMessage = "Batch export finished. Exported pairs: " + std::to_string(exported);
+    auto progress = std::make_shared<GenericTaskProgress>();
+    progress->total.store(total);
+    m_exportBatchProgress = progress;
+
+    context.session.workflowPhase = WorkflowPhase::Export;
+    m_backgroundStatus = "Batch export running...";
+
+    m_exportBatchTask = std::async(
+        std::launch::async,
+        [pairs, registrations, fixedSlices, movingSlices, baseDir, progress]()
+        {
+            ExportBatchTaskResult taskResult;
+            taskResult.total = static_cast<int>(pairs.size());
+
+            ExportController exportController;
+
+            for (const PairRecord& pair : pairs)
+            {
+                if (progress->cancelRequested.load())
+                {
+                    taskResult.cancelled = true;
+                    break;
+                }
+
+                if (!pair.valid)
+                {
+                    continue;
+                }
+
+                const RegistrationResult* reg =
+                    FindRegistrationResult(registrations, pair.fixedIndex, pair.movingIndex);
+                if (reg == nullptr)
+                {
+                    continue;
+                }
+
+                if (pair.fixedIndex  < 0 || pair.fixedIndex  >= static_cast<int>(fixedSlices.size()) ||
+                    pair.movingIndex < 0 || pair.movingIndex >= static_cast<int>(movingSlices.size()))
+                {
+                    continue;
+                }
+
+                {
+                    std::scoped_lock lock(progress->statusMutex);
+                    progress->statusMessage =
+                        "Exporting B:" + std::to_string(pair.movingIndex) +
+                        " -> A:" + std::to_string(pair.fixedIndex);
+                }
+
+                const std::filesystem::path movingToFixedPath =
+                    baseDir / "moving_to_fixed" /
+                    ("B" + std::to_string(pair.movingIndex) + "_to_A" + std::to_string(pair.fixedIndex) + ".png");
+                const std::filesystem::path fixedToMovingPath =
+                    baseDir / "fixed_to_moving" /
+                    ("A" + std::to_string(pair.fixedIndex) + "_to_B" + std::to_string(pair.movingIndex) + ".png");
+
+                Result fwd = exportController.ExportAlignedMovingToFixed(
+                    movingSlices[pair.movingIndex].filePath,
+                    fixedSlices[pair.fixedIndex].filePath,
+                    *reg, movingToFixedPath);
+                Result inv = exportController.ExportAlignedFixedToMoving(
+                    fixedSlices[pair.fixedIndex].filePath,
+                    movingSlices[pair.movingIndex].filePath,
+                    *reg, fixedToMovingPath);
+
+                progress->attempted.fetch_add(1);
+
+                if (fwd.ok && inv.ok)
+                {
+                    ++taskResult.exported;
+                }
+            }
+
+            return taskResult;
+        });
+
+    m_lastMessage = "Batch export started.";
+}
+
+void MainWindow::CancelExportBatch()
+{
+    if (m_exportBatchProgress != nullptr)
+    {
+        m_exportBatchProgress->cancelRequested.store(true);
+        std::scoped_lock lock(m_exportBatchProgress->statusMutex);
+        m_exportBatchProgress->statusMessage = "Cancellation requested...";
+    }
 }
 
 void MainWindow::StoreRegistrationResult(AppContext& context, const RegistrationResult& computed)
 {
+    RegistrationResult stored = computed;
+    AppendHistorySnapshot(stored, BuildSnapshotLabel(stored));
+
     RegistrationResult* existing =
         FindRegistrationResult(context.session.registrations, computed.fixedIndex, computed.movingIndex);
     if (existing != nullptr)
     {
-        *existing = computed;
+        stored.history.insert(stored.history.begin(), existing->history.begin(), existing->history.end());
+        *existing = std::move(stored);
     }
     else
     {
-        context.session.registrations.push_back(computed);
+        context.session.registrations.push_back(std::move(stored));
     }
 }
 
@@ -1122,6 +1397,10 @@ RegistrationResult* MainWindow::GetOrCreateCurrentRegistration(AppContext& conte
 void MainWindow::DrawLandmarkEditor(AppContext& context)
 {
     ImGui::TextUnformatted("Manual Landmarks");
+    if (!context.landmarkModeEnabled)
+    {
+        ImGui::TextWrapped("Enable Landmark Mode to place or move points directly in Stack A and Stack B.");
+    }
     RegistrationResult* registration = GetOrCreateCurrentRegistration(context);
     if (registration == nullptr)
     {
@@ -1220,6 +1499,9 @@ void MainWindow::ApplyManualLandmarks(AppContext& context)
         return;
     }
 
+    StoreRegistrationResult(context, *registration);
+    registration = GetOrCreateCurrentRegistration(context);
+
     if (context.session.projectPreferences.activeSliceA >= 0 &&
         context.session.projectPreferences.activeSliceA < static_cast<int>(context.session.pairing.pairs.size()))
     {
@@ -1227,6 +1509,7 @@ void MainWindow::ApplyManualLandmarks(AppContext& context)
         pair.status = PairStatus::Manual;
     }
 
+    context.session.workflowPhase = WorkflowPhase::ManualRefinement;
     m_lastMessage = "Manual landmark alignment applied to the current pair.";
 }
 
@@ -1260,6 +1543,7 @@ void MainWindow::AnalyzeConvergence(AppContext& context)
                                        }
                                        return taskResult;
                                    });
+    context.session.workflowPhase = WorkflowPhase::ConvergenceAnalysis;
     m_lastMessage = "Convergence analysis started.";
 }
 
@@ -1270,58 +1554,123 @@ void MainWindow::RunPriorRefinement(AppContext& context)
         m_lastMessage = "Run the first pass before prior refinement.";
         return;
     }
-
-    m_convergenceAnalyzer.Analyze(context.session.registrations);
-
-    int refined = 0;
-    for (RegistrationResult& registration : context.session.registrations)
+    if (HasBackgroundTask())
     {
-        if (!registration.hasConvergencePrior || registration.isManual)
-        {
-            continue;
-        }
-
-        if (registration.fixedIndex < 0 || registration.fixedIndex >= static_cast<int>(context.session.stackA.slices.size()) ||
-            registration.movingIndex < 0 || registration.movingIndex >= static_cast<int>(context.session.stackB.slices.size()))
-        {
-            continue;
-        }
-
-        const SliceRecord& fixedSlice = context.session.stackA.slices[registration.fixedIndex];
-        const SliceRecord& movingSlice = context.session.stackB.slices[registration.movingIndex];
-        cv::Mat movingImage;
-        cv::Mat fixedImage;
-        Result loadMoving = m_imageLoader.LoadColorImage(movingSlice.filePath, movingImage);
-        Result loadFixed = m_imageLoader.LoadColorImage(fixedSlice.filePath, fixedImage);
-        if (!loadMoving.ok || !loadFixed.ok)
-        {
-            continue;
-        }
-
-        RegistrationResult refinedResult = registration;
-        Result refine = m_registrationEngine.RefineCtToPhotoFromPrior(
-            movingImage,
-            fixedImage,
-            registration.priorTx,
-            registration.priorTy,
-            registration.priorTheta,
-            registration.priorScale,
-            refinedResult);
-        if (!refine.ok)
-        {
-            continue;
-        }
-
-        refinedResult.fixedIndex = registration.fixedIndex;
-        refinedResult.movingIndex = registration.movingIndex;
-        refinedResult.isManual = false;
-        refinedResult.convergenceOutlier = false;
-        registration = refinedResult;
-        ++refined;
+        m_lastMessage = "Wait for the current background task to finish before starting prior refinement.";
+        return;
     }
 
+    const bool useAffine = context.session.projectPreferences.transformType == "affine";
+
+    // Pre-analyze on main thread so priors are current before the async copy.
     m_convergenceAnalyzer.Analyze(context.session.registrations);
-    m_lastMessage = "Prior refinement complete. Refined registrations: " + std::to_string(refined) + ".";
+
+    std::vector<RegistrationResult> registrations = context.session.registrations;
+    const std::vector<SliceRecord>  fixedSlices   = context.session.stackA.slices;
+    const std::vector<SliceRecord>  movingSlices  = context.session.stackB.slices;
+
+    int total = 0;
+    for (const RegistrationResult& r : registrations)
+    {
+        if (r.hasConvergencePrior && !r.isManual)
+        {
+            ++total;
+        }
+    }
+
+    auto progress = std::make_shared<GenericTaskProgress>();
+    progress->total.store(total);
+    m_priorRefinementProgress = progress;
+
+    context.session.workflowPhase = WorkflowPhase::PriorRefinement;
+    m_backgroundStatus = "Prior refinement running...";
+
+    m_priorRefinementTask = std::async(
+        std::launch::async,
+        [registrations, fixedSlices, movingSlices, useAffine, progress]() mutable
+        {
+            PriorRefinementTaskResult taskResult;
+            taskResult.registrations = registrations;
+
+            ImageLoader      imageLoader;
+            RegistrationEngine registrationEngine;
+            ConvergenceAnalyzer convergenceAnalyzer;
+
+            for (RegistrationResult& reg : taskResult.registrations)
+            {
+                if (progress->cancelRequested.load())
+                {
+                    taskResult.cancelled = true;
+                    break;
+                }
+
+                if (!reg.hasConvergencePrior || reg.isManual)
+                {
+                    continue;
+                }
+
+                if (reg.fixedIndex < 0  || reg.fixedIndex  >= static_cast<int>(fixedSlices.size()) ||
+                    reg.movingIndex < 0 || reg.movingIndex >= static_cast<int>(movingSlices.size()))
+                {
+                    continue;
+                }
+
+                {
+                    std::scoped_lock lock(progress->statusMutex);
+                    progress->statusMessage =
+                        "Refining B:" + std::to_string(reg.movingIndex) +
+                        " -> A:" + std::to_string(reg.fixedIndex);
+                }
+
+                cv::Mat movingImage, fixedImage;
+                if (!imageLoader.LoadColorImage(movingSlices[reg.movingIndex].filePath, movingImage).ok ||
+                    !imageLoader.LoadColorImage(fixedSlices[reg.fixedIndex].filePath,   fixedImage).ok)
+                {
+                    progress->attempted.fetch_add(1);
+                    continue;
+                }
+
+                RegistrationResult refined = reg;
+                Result refine = registrationEngine.RefineCtToPhotoFromPrior(
+                    movingImage, fixedImage,
+                    reg.priorTx, reg.priorTy, reg.priorTheta, reg.priorScale,
+                    refined, useAffine,
+                    reg.priorSx, reg.priorSy);
+
+                progress->attempted.fetch_add(1);
+
+                if (!refine.ok)
+                {
+                    continue;
+                }
+
+                refined.fixedIndex        = reg.fixedIndex;
+                refined.movingIndex       = reg.movingIndex;
+                refined.isManual          = false;
+                refined.convergenceOutlier = false;
+                reg = refined;
+                ++taskResult.refined;
+            }
+
+            if (!taskResult.cancelled)
+            {
+                convergenceAnalyzer.Analyze(taskResult.registrations);
+            }
+
+            return taskResult;
+        });
+
+    m_lastMessage = "Prior refinement started.";
+}
+
+void MainWindow::CancelPriorRefinement()
+{
+    if (m_priorRefinementProgress != nullptr)
+    {
+        m_priorRefinementProgress->cancelRequested.store(true);
+        std::scoped_lock lock(m_priorRefinementProgress->statusMutex);
+        m_priorRefinementProgress->statusMessage = "Cancellation requested...";
+    }
 }
 
 MainWindow::BatchSummary MainWindow::BuildBatchSummary(const AppContext& context) const
@@ -1374,6 +1723,41 @@ void MainWindow::ProcessAsyncTasks(AppContext& context)
 {
     using namespace std::chrono_literals;
 
+    if (m_currentAlignmentTask.has_value() &&
+        m_currentAlignmentTask->wait_for(0ms) == std::future_status::ready)
+    {
+        CurrentAlignmentTaskResult result = m_currentAlignmentTask->get();
+        m_currentAlignmentTask.reset();
+        m_backgroundStatus.clear();
+
+        if (!result.result.ok)
+        {
+            m_lastMessage = result.result.message;
+        }
+        else
+        {
+            StoreRegistrationResult(context, result.registration);
+            if (result.pairListIndex >= 0 &&
+                result.pairListIndex < static_cast<int>(context.session.pairing.pairs.size()))
+            {
+                context.session.pairing.pairs[result.pairListIndex].status = result.pairStatus;
+            }
+            if (context.session.workflowPhase == WorkflowPhase::Setup)
+            {
+                context.session.workflowPhase = result.workflowPhase;
+            }
+            else if (result.workflowPhase == WorkflowPhase::ManualRefinement)
+            {
+                context.session.workflowPhase = result.workflowPhase;
+            }
+
+            context.selectedHistoryIndex = -1;
+            m_lastMessage = "Alignment computed for pair B:" + std::to_string(result.registration.movingIndex) +
+                            " -> A:" + std::to_string(result.registration.fixedIndex) +
+                            " with score " + std::to_string(result.registration.score);
+        }
+    }
+
     if (m_stackLoadTask.has_value() &&
         m_stackLoadTask->wait_for(0ms) == std::future_status::ready)
     {
@@ -1423,10 +1807,277 @@ void MainWindow::ProcessAsyncTasks(AppContext& context)
                             std::to_string(result.outlierCount) + ".";
         }
     }
+
+    if (m_priorRefinementTask.has_value() &&
+        m_priorRefinementTask->wait_for(0ms) == std::future_status::ready)
+    {
+        PriorRefinementTaskResult result = m_priorRefinementTask->get();
+        m_priorRefinementTask.reset();
+        m_priorRefinementProgress.reset();
+        m_backgroundStatus.clear();
+
+        if (!result.result.ok)
+        {
+            m_lastMessage = result.result.message;
+        }
+        else if (result.cancelled)
+        {
+            m_lastMessage = "Prior refinement cancelled. Refined so far: " +
+                            std::to_string(result.refined) + ".";
+        }
+        else
+        {
+            context.session.registrations = std::move(result.registrations);
+            m_lastMessage = "Prior refinement complete. Refined registrations: " +
+                            std::to_string(result.refined) + ".";
+        }
+    }
+
+    if (m_exportBatchTask.has_value() &&
+        m_exportBatchTask->wait_for(0ms) == std::future_status::ready)
+    {
+        ExportBatchTaskResult result = m_exportBatchTask->get();
+        m_exportBatchTask.reset();
+        m_exportBatchProgress.reset();
+        m_backgroundStatus.clear();
+
+        if (!result.result.ok)
+        {
+            m_lastMessage = result.result.message;
+        }
+        else if (result.cancelled)
+        {
+            m_lastMessage = "Batch export cancelled. Exported so far: " +
+                            std::to_string(result.exported) + ".";
+        }
+        else
+        {
+            m_lastMessage = "Batch export finished. Exported pairs: " +
+                            std::to_string(result.exported) + ".";
+        }
+    }
 }
 
 bool MainWindow::HasBackgroundTask() const
 {
-    return m_stackLoadTask.has_value() || m_convergenceTask.has_value() || m_batchTask.has_value();
+    return m_currentAlignmentTask.has_value() ||
+           m_stackLoadTask.has_value()        ||
+           m_convergenceTask.has_value()      ||
+           m_batchTask.has_value()            ||
+           m_priorRefinementTask.has_value()  ||
+           m_exportBatchTask.has_value();
 }
+
+// ──────────────────────────────────────────────────────────────
+// Operation history panel
+// ──────────────────────────────────────────────────────────────
+
+void MainWindow::DrawOperationHistory(AppContext& context)
+{
+    ImGui::TextUnformatted("Operation History");
+    ShowHoveredHelp("Select a previous alignment state to preview it in the composite viewer. Delete entries to roll back audit history for this pair.");
+
+    RegistrationResult* reg = GetOrCreateCurrentRegistration(context);
+
+    if (reg == nullptr)
+    {
+        ImGui::TextDisabled("No registration for current pair.");
+        return;
+    }
+
+    if (reg->history.empty())
+    {
+        if (!reg->operationLog.empty())
+        {
+            for (const std::string& entry : reg->operationLog)
+            {
+                ImGui::TextWrapped("%s", entry.c_str());
+            }
+        }
+        else
+        {
+            ImGui::TextDisabled("No stored history yet.");
+        }
+        return;
+    }
+
+    const int historyCount = static_cast<int>(reg->history.size());
+    context.selectedHistoryIndex = (std::clamp)(context.selectedHistoryIndex, -1, historyCount - 1);
+
+    if (ImGui::Button("Show Latest"))
+    {
+        context.selectedHistoryIndex = -1;
+    }
+    ImGui::SameLine();
+    const bool canDelete = context.selectedHistoryIndex >= 0 &&
+                           context.selectedHistoryIndex < historyCount;
+    if (!canDelete)
+    {
+        ImGui::BeginDisabled();
+    }
+    if (ImGui::Button("Delete Selected"))
+    {
+        const int deleteIndex = context.selectedHistoryIndex;
+        reg->history.erase(reg->history.begin() + context.selectedHistoryIndex);
+        context.selectedHistoryIndex = -1;
+        if (!reg->history.empty())
+        {
+            const RegistrationSnapshot& latest = reg->history.back();
+            reg->forward = latest.forward;
+            reg->inverse = latest.inverse;
+            reg->transformType = latest.transformType;
+            reg->score = latest.score;
+            reg->manualRmsError = latest.manualRmsError;
+            reg->isManual = latest.isManual;
+        }
+        else if (deleteIndex >= 0)
+        {
+            reg->forward = Transform2D{};
+            reg->inverse = Transform2D{};
+            reg->score = 0.0;
+            reg->manualRmsError = 0.0;
+            reg->converged = false;
+            reg->isManual = false;
+            reg->transformType = "none";
+            reg->iterations.clear();
+        }
+        return;
+    }
+    if (!canDelete)
+    {
+        ImGui::EndDisabled();
+    }
+
+    for (int i = historyCount - 1; i >= 0; --i)
+    {
+        const RegistrationSnapshot& snapshot = reg->history[static_cast<size_t>(i)];
+        const bool selected = context.selectedHistoryIndex == i;
+        std::string label = snapshot.label.empty() ? ("Step " + std::to_string(i + 1)) : snapshot.label;
+        if (ImGui::Selectable(label.c_str(), selected))
+        {
+            context.selectedHistoryIndex = i;
+        }
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::BeginTooltip();
+            ImGui::Text("Score: %.4f", snapshot.score);
+            ImGui::Text("Transform: %s", snapshot.transformType.c_str());
+            if (snapshot.isManual)
+            {
+                ImGui::Text("Manual RMS: %.3f px", snapshot.manualRmsError);
+            }
+            if (!snapshot.timestamp.empty())
+            {
+                ImGui::TextUnformatted(snapshot.timestamp.c_str());
+            }
+            ImGui::EndTooltip();
+        }
+    }
+
+    if (reg->convergenceOutlier)
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.2f, 1.0f), "[!] Convergence outlier");
+
+    if (!reg->timestamp.empty())
+        ImGui::TextDisabled("Last updated: %s", reg->timestamp.c_str());
+}
+
+// ──────────────────────────────────────────────────────────────
+// Per-slice transform metrics graph
+// ──────────────────────────────────────────────────────────────
+
+void MainWindow::DrawMetricsGraph(AppContext& context)
+{
+    TextWithHelp("Stack Metrics", "Plots one transform parameter across the stack so you can spot drift, jumps, or outliers between neighboring slices.");
+
+    const auto& regs = context.session.registrations;
+    if (regs.empty())
+    {
+        ImGui::TextDisabled("No registrations available.");
+        return;
+    }
+
+    // Sort by moving index for a left-to-right stack view
+    std::vector<const RegistrationResult*> sorted;
+    sorted.reserve(regs.size());
+    for (const auto& r : regs)
+        sorted.push_back(&r);
+    std::sort(sorted.begin(), sorted.end(),
+              [](const RegistrationResult* a, const RegistrationResult* b) {
+                  return a->movingIndex < b->movingIndex;
+              });
+
+    const int n = static_cast<int>(sorted.size());
+
+    // Build per-parameter float arrays
+    std::vector<float> txVals(n), tyVals(n), thetaVals(n), scaleVals(n), scoreVals(n);
+    std::vector<bool>  outlierFlags(n, false);
+
+    constexpr double kPi = 3.14159265358979323846;
+    for (int i = 0; i < n; ++i)
+    {
+        const RegistrationResult& r = *sorted[i];
+        if (!r.iterations.empty())
+        {
+            const IterationRecord& it = r.iterations.back();
+            txVals[i]    = static_cast<float>(it.tx);
+            tyVals[i]    = static_cast<float>(it.ty);
+            thetaVals[i] = static_cast<float>(it.theta * 180.0 / kPi);
+            // For affine show sx; for similarity show scale
+            scaleVals[i] = static_cast<float>(it.sx > 0.0 ? it.sx : it.scale);
+        }
+        scoreVals[i]   = static_cast<float>(r.score);
+        outlierFlags[i] = r.convergenceOutlier;
+    }
+
+    // Parameter selector
+    static int s_paramIdx = 0;
+    static const char* kParamLabels[] = {"tx (px)", "ty (px)", "theta (deg)", "scale / sx", "score"};
+    ImGui::SetNextItemWidth(120.0f);
+    ImGui::Combo("##ParamSel", &s_paramIdx, kParamLabels, IM_ARRAYSIZE(kParamLabels));
+    ShowHoveredHelp("Choose which registration parameter to plot along the stack.");
+
+    const std::vector<float>* data = nullptr;
+    switch (s_paramIdx)
+    {
+    case 0:  data = &txVals;    break;
+    case 1:  data = &tyVals;    break;
+    case 2:  data = &thetaVals; break;
+    case 3:  data = &scaleVals; break;
+    default: data = &scoreVals; break;
+    }
+
+    // Stats
+    const float sum  = std::accumulate(data->begin(), data->end(), 0.0f);
+    const float mean = n > 0 ? sum / static_cast<float>(n) : 0.0f;
+    float varAcc = 0.0f;
+    for (float v : *data) varAcc += (v - mean) * (v - mean);
+    const float stdDev = n > 1 ? std::sqrt(varAcc / static_cast<float>(n)) : 0.0f;
+
+    const float vMin = *std::min_element(data->begin(), data->end());
+    const float vMax = *std::max_element(data->begin(), data->end());
+    const float pad  = (vMax - vMin) * 0.12f + 0.5f;
+
+    char overlay[64];
+    std::snprintf(overlay, sizeof(overlay), "mean=%.2f  std=%.2f", mean, stdDev);
+
+    ImGui::PlotLines("##Metrics", data->data(), n, 0, overlay,
+                     vMin - pad, vMax + pad, ImVec2(-1.0f, 70.0f));
+
+    // Outlier summary
+    int outlierCount = 0;
+    for (bool o : outlierFlags) if (o) ++outlierCount;
+    if (outlierCount > 0)
+    {
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.2f, 1.0f), "Outliers (%d):", outlierCount);
+        for (int i = 0; i < n; ++i)
+        {
+            if (outlierFlags[i])
+            {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.2f, 1.0f), "B%d", sorted[i]->movingIndex);
+            }
+        }
+    }
+}
+
 } // namespace align

@@ -62,6 +62,44 @@ PairStatus ResolveStackBStatus(const AppContext& context, int stackBIndex)
 
     return PairStatus::Unmatched;
 }
+
+bool HasManualRegistrationForStackA(const AppContext& context, int stackAIndex)
+{
+    if (stackAIndex < 0 || stackAIndex >= static_cast<int>(context.session.pairing.pairs.size()))
+    {
+        return false;
+    }
+
+    const PairRecord& pair = context.session.pairing.pairs[stackAIndex];
+    if (!pair.valid)
+    {
+        return false;
+    }
+
+    const RegistrationResult* registration =
+        FindRegistrationResult(context.session.registrations, pair.fixedIndex, pair.movingIndex);
+    return registration != nullptr && registration->isManual;
+}
+
+bool HasManualRegistrationForStackB(const AppContext& context, int stackBIndex)
+{
+    for (const PairRecord& pair : context.session.pairing.pairs)
+    {
+        if (!pair.valid || pair.movingIndex != stackBIndex)
+        {
+            continue;
+        }
+
+        const RegistrationResult* registration =
+            FindRegistrationResult(context.session.registrations, pair.fixedIndex, pair.movingIndex);
+        if (registration != nullptr && registration->isManual)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
 } // namespace
 
 void TimelinePanel::Draw(AppContext& context, float height)
@@ -69,6 +107,10 @@ void TimelinePanel::Draw(AppContext& context, float height)
     ImGui::BeginChild("TimelineRegion", ImVec2(0.0f, height), true);
 
     ImGui::TextUnformatted("Timeline");
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
+    {
+        ImGui::SetTooltip("Thumbnail timeline for both stacks. Drag the strip to adjust pairing offsets; colored markers below thumbnails indicate manual landmark alignments.");
+    }
     ImGui::TextWrapped("Arraste a faixa de cada timeline para deslocar visualmente os stacks e ajustar a correspondencia.");
     ImGui::Text("Derived Offset (B -> A): %d", context.session.pairing.globalOffset);
     ImGui::Separator();
@@ -202,6 +244,7 @@ float TimelinePanel::DrawStackTimeline(AppContext& context,
         if (clicked)
         {
             activeIndex = i;
+            context.selectedHistoryIndex = -1;
             if (&stack == &context.session.stackA && i < static_cast<int>(context.session.pairing.pairs.size()))
             {
                 const PairRecord& pair = context.session.pairing.pairs[i];
@@ -221,6 +264,18 @@ float TimelinePanel::DrawStackTimeline(AppContext& context,
         }
 
         ImGui::Text("%03d", i);
+        const bool hasManualMarker = (&stack == &context.session.stackA)
+                                         ? HasManualRegistrationForStackA(context, i)
+                                         : HasManualRegistrationForStackB(context, i);
+        if (hasManualMarker)
+        {
+            const ImVec2 markerMin = ImGui::GetItemRectMin();
+            const ImVec2 markerMax = ImGui::GetItemRectMax();
+            drawList->AddRectFilled(ImVec2(markerMin.x + 8.0f, markerMax.y + 2.0f),
+                                    ImVec2(markerMin.x + 20.0f, markerMax.y + 10.0f),
+                                    IM_COL32(255, 182, 66, 255),
+                                    2.0f);
+        }
         ImGui::EndGroup();
 
         if (isActive)

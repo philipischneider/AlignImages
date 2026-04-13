@@ -43,6 +43,8 @@ struct AppContext
 {
     SessionModel session;
     bool showDemoWindow = false;
+    bool landmarkModeEnabled = false;
+    int selectedHistoryIndex = -1;
     PendingLandmarkPoint pendingLandmarkPoint;
     LandmarkEditState landmarkEditState;
     BatchProcessState batchProcessState;

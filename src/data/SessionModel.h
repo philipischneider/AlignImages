@@ -9,6 +9,16 @@
 
 namespace align
 {
+enum class WorkflowPhase
+{
+    Setup,
+    InitialAlignment,
+    ConvergenceAnalysis,
+    PriorRefinement,
+    ManualRefinement,
+    Export
+};
+
 enum class DpiMode
 {
     Auto,
@@ -53,6 +63,7 @@ struct SessionModel
 {
     std::string projectName = "untitled_session";
     std::string version = "0.1.0";
+    WorkflowPhase workflowPhase = WorkflowPhase::Setup;
     StackModel stackA;
     StackModel stackB;
     PairingModel pairing;

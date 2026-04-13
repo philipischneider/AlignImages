@@ -8,6 +8,29 @@ namespace align
 {
 namespace
 {
+const char* ToString(WorkflowPhase phase)
+{
+    switch (phase)
+    {
+    case WorkflowPhase::InitialAlignment:   return "initial_alignment";
+    case WorkflowPhase::ConvergenceAnalysis: return "convergence_analysis";
+    case WorkflowPhase::PriorRefinement:    return "prior_refinement";
+    case WorkflowPhase::ManualRefinement:   return "manual_refinement";
+    case WorkflowPhase::Export:             return "export";
+    default:                                return "setup";
+    }
+}
+
+WorkflowPhase ParseWorkflowPhase(const std::string& s)
+{
+    if (s == "initial_alignment")    return WorkflowPhase::InitialAlignment;
+    if (s == "convergence_analysis") return WorkflowPhase::ConvergenceAnalysis;
+    if (s == "prior_refinement")     return WorkflowPhase::PriorRefinement;
+    if (s == "manual_refinement")    return WorkflowPhase::ManualRefinement;
+    if (s == "export")               return WorkflowPhase::Export;
+    return WorkflowPhase::Setup;
+}
+
 const char* ToString(DpiMode mode)
 {
     return mode == DpiMode::Auto ? "auto" : "manual";
@@ -82,6 +105,7 @@ Result SessionSerializer::Save(const SessionModel& session, const std::filesyste
     root["project"] = {
         {"name", session.projectName},
         {"version", session.version},
+        {"workflow_phase", ToString(session.workflowPhase)},
         {"registration_preset", session.projectPreferences.registrationPreset},
         {"auto_alignment_method", session.projectPreferences.autoAlignmentMethod},
         {"mask_method", session.projectPreferences.maskMethod},
@@ -164,9 +188,29 @@ Result SessionSerializer::Save(const SessionModel& session, const std::filesyste
             {"prior_ty", registration.priorTy},
             {"prior_theta", registration.priorTheta},
             {"prior_scale", registration.priorScale},
+            {"prior_sx", registration.priorSx},
+            {"prior_sy", registration.priorSy},
+            {"timestamp", registration.timestamp},
+            {"algorithm_version", registration.algorithmVersion},
+            {"operation_log", registration.operationLog},
+            {"history", nlohmann::json::array()},
             {"iterations", nlohmann::json::array()},
             {"landmarks", nlohmann::json::array()}
         });
+
+        for (const RegistrationSnapshot& snapshot : registration.history)
+        {
+            root["registrations"].back()["history"].push_back({
+                {"label", snapshot.label},
+                {"timestamp", snapshot.timestamp},
+                {"transform_type", snapshot.transformType},
+                {"forward_matrix_3x3", snapshot.forward.matrix},
+                {"inverse_matrix_3x3", snapshot.inverse.matrix},
+                {"score", snapshot.score},
+                {"manual_rms_error", snapshot.manualRmsError},
+                {"is_manual", snapshot.isManual}
+            });
+        }
 
         for (const IterationRecord& iteration : registration.iterations)
         {
@@ -177,6 +221,8 @@ Result SessionSerializer::Save(const SessionModel& session, const std::filesyste
                 {"ty", iteration.ty},
                 {"theta", iteration.theta},
                 {"scale", iteration.scale},
+                {"sx", iteration.sx},
+                {"sy", iteration.sy},
                 {"converged", iteration.converged}
             });
         }
@@ -218,6 +264,7 @@ Result SessionSerializer::Load(const std::filesystem::path& filePath, SessionMod
     SessionModel loaded = CreateDefaultSession();
     loaded.projectName = root["project"].value("name", loaded.projectName);
     loaded.version = root["project"].value("version", loaded.version);
+    loaded.workflowPhase = ParseWorkflowPhase(root["project"].value("workflow_phase", "setup"));
     loaded.projectPreferences.registrationPreset =
         root["project"].value("registration_preset", loaded.projectPreferences.registrationPreset);
     loaded.projectPreferences.autoAlignmentMethod =
@@ -321,10 +368,49 @@ Result SessionSerializer::Load(const std::filesystem::path& filePath, SessionMod
             registration.hasConvergencePrior = item.value("has_convergence_prior", false);
             registration.convergenceOutlier = item.value("convergence_outlier", false);
             registration.refinedWithPrior = item.value("refined_with_prior", false);
-            registration.priorTx = item.value("prior_tx", 0.0);
-            registration.priorTy = item.value("prior_ty", 0.0);
+            registration.priorTx    = item.value("prior_tx", 0.0);
+            registration.priorTy    = item.value("prior_ty", 0.0);
             registration.priorTheta = item.value("prior_theta", 0.0);
             registration.priorScale = item.value("prior_scale", 1.0);
+            registration.priorSx    = item.value("prior_sx", -1.0);
+            registration.priorSy    = item.value("prior_sy", -1.0);
+            registration.timestamp       = item.value("timestamp", "");
+            registration.algorithmVersion = item.value("algorithm_version", "");
+            if (item.contains("operation_log") && item["operation_log"].is_array())
+            {
+                for (const auto& entry : item["operation_log"])
+                    registration.operationLog.push_back(entry.get<std::string>());
+            }
+            if (item.contains("history") && item["history"].is_array())
+            {
+                for (const auto& historyItem : item["history"])
+                {
+                    RegistrationSnapshot snapshot;
+                    snapshot.label = historyItem.value("label", "");
+                    snapshot.timestamp = historyItem.value("timestamp", "");
+                    snapshot.transformType = historyItem.value("transform_type", "similarity");
+                    snapshot.score = historyItem.value("score", 0.0);
+                    snapshot.manualRmsError = historyItem.value("manual_rms_error", 0.0);
+                    snapshot.isManual = historyItem.value("is_manual", false);
+                    if (historyItem.contains("forward_matrix_3x3") && historyItem["forward_matrix_3x3"].is_array() &&
+                        historyItem["forward_matrix_3x3"].size() == 9)
+                    {
+                        for (size_t i = 0; i < 9; ++i)
+                        {
+                            snapshot.forward.matrix[i] = historyItem["forward_matrix_3x3"][i].get<double>();
+                        }
+                    }
+                    if (historyItem.contains("inverse_matrix_3x3") && historyItem["inverse_matrix_3x3"].is_array() &&
+                        historyItem["inverse_matrix_3x3"].size() == 9)
+                    {
+                        for (size_t i = 0; i < 9; ++i)
+                        {
+                            snapshot.inverse.matrix[i] = historyItem["inverse_matrix_3x3"][i].get<double>();
+                        }
+                    }
+                    registration.history.push_back(std::move(snapshot));
+                }
+            }
 
             if (item.contains("forward_matrix_3x3") && item["forward_matrix_3x3"].is_array() &&
                 item["forward_matrix_3x3"].size() == 9)
@@ -350,11 +436,13 @@ Result SessionSerializer::Load(const std::filesystem::path& filePath, SessionMod
                 {
                     IterationRecord iteration;
                     iteration.index = iterationItem.value("index", 0);
-                    iteration.score = iterationItem.value("score", 0.0);
-                    iteration.tx = iterationItem.value("tx", 0.0);
-                    iteration.ty = iterationItem.value("ty", 0.0);
-                    iteration.theta = iterationItem.value("theta", 0.0);
-                    iteration.scale = iterationItem.value("scale", 1.0);
+                    iteration.score     = iterationItem.value("score", 0.0);
+                    iteration.tx        = iterationItem.value("tx", 0.0);
+                    iteration.ty        = iterationItem.value("ty", 0.0);
+                    iteration.theta     = iterationItem.value("theta", 0.0);
+                    iteration.scale     = iterationItem.value("scale", 1.0);
+                    iteration.sx        = iterationItem.value("sx", -1.0);
+                    iteration.sy        = iterationItem.value("sy", -1.0);
                     iteration.converged = iterationItem.value("converged", false);
                     registration.iterations.push_back(iteration);
                 }

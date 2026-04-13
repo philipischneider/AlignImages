@@ -1,5 +1,7 @@
 #include "viewer/ViewerPanel.h"
 
+#include "registration/LandmarkRegistration.h"
+
 #include "imgui.h"
 
 #include <opencv2/core.hpp>
@@ -8,13 +10,14 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <utility>
 
 namespace align
 {
 namespace
 {
-RegistrationResult* GetOrCreateCurrentRegistration(AppContext& context)
+const PairRecord* GetActivePair(const AppContext& context)
 {
     const int activeSliceA = context.session.projectPreferences.activeSliceA;
     if (activeSliceA < 0 || activeSliceA >= static_cast<int>(context.session.pairing.pairs.size()))
@@ -23,21 +26,130 @@ RegistrationResult* GetOrCreateCurrentRegistration(AppContext& context)
     }
 
     const PairRecord& pair = context.session.pairing.pairs[activeSliceA];
-    if (!pair.valid)
+    return pair.valid ? &pair : nullptr;
+}
+
+const RegistrationResult* FindCurrentRegistration(const AppContext& context)
+{
+    const PairRecord* pair = GetActivePair(context);
+    if (pair == nullptr)
+    {
+        return nullptr;
+    }
+
+    return FindRegistrationResult(context.session.registrations, pair->fixedIndex, pair->movingIndex);
+}
+
+const RegistrationResult* ResolvePreviewRegistration(const AppContext& context,
+                                                     const RegistrationResult* currentRegistration,
+                                                     RegistrationResult& historySelection)
+{
+    if (currentRegistration == nullptr)
+    {
+        return nullptr;
+    }
+
+    const int selectedHistoryIndex = context.selectedHistoryIndex;
+    if (selectedHistoryIndex < 0 ||
+        selectedHistoryIndex >= static_cast<int>(currentRegistration->history.size()))
+    {
+        return currentRegistration;
+    }
+
+    const RegistrationSnapshot& snapshot = currentRegistration->history[static_cast<size_t>(selectedHistoryIndex)];
+    historySelection = *currentRegistration;
+    historySelection.forward = snapshot.forward;
+    historySelection.inverse = snapshot.inverse;
+    historySelection.transformType = snapshot.transformType;
+    historySelection.score = snapshot.score;
+    historySelection.manualRmsError = snapshot.manualRmsError;
+    historySelection.isManual = snapshot.isManual;
+    return &historySelection;
+}
+
+bool HasUsableTransform(const RegistrationResult* registration)
+{
+    if (registration == nullptr)
+    {
+        return false;
+    }
+
+    return registration->converged || registration->isManual || !registration->iterations.empty();
+}
+
+bool HasFixedPoint(const LandmarkPair& landmark)
+{
+    return std::isfinite(landmark.fixedX) && std::isfinite(landmark.fixedY);
+}
+
+int FindFirstIncompleteLandmarkIndex(const RegistrationResult& registration)
+{
+    for (int i = 0; i < static_cast<int>(registration.landmarks.size()); ++i)
+    {
+        if (!HasFixedPoint(registration.landmarks[i]))
+        {
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+void UpdateManualPreviewRegistration(RegistrationResult& registration)
+{
+    std::vector<LandmarkPair> completedLandmarks;
+    completedLandmarks.reserve(registration.landmarks.size());
+    for (const LandmarkPair& landmark : registration.landmarks)
+    {
+        if (HasFixedPoint(landmark))
+        {
+            completedLandmarks.push_back(landmark);
+        }
+    }
+
+    if (completedLandmarks.size() < 2)
+    {
+        registration.transformType = "manual_landmarks_pending";
+        registration.forward = Transform2D{};
+        registration.inverse = Transform2D{};
+        registration.score = 0.0;
+        registration.manualRmsError = 0.0;
+        registration.converged = false;
+        registration.isManual = false;
+        registration.iterations.clear();
+        return;
+    }
+
+    RegistrationResult preview = registration;
+    preview.landmarks = std::move(completedLandmarks);
+    LandmarkRegistration landmarkRegistration;
+    if (landmarkRegistration.ComputeFromLandmarks(preview).ok)
+    {
+        preview.fixedIndex = registration.fixedIndex;
+        preview.movingIndex = registration.movingIndex;
+        preview.landmarks = registration.landmarks;
+        registration = std::move(preview);
+    }
+}
+
+RegistrationResult* GetOrCreateCurrentRegistration(AppContext& context)
+{
+    const PairRecord* pair = GetActivePair(context);
+    if (pair == nullptr)
     {
         return nullptr;
     }
 
     RegistrationResult* existing =
-        FindRegistrationResult(context.session.registrations, pair.fixedIndex, pair.movingIndex);
+        FindRegistrationResult(context.session.registrations, pair->fixedIndex, pair->movingIndex);
     if (existing != nullptr)
     {
         return existing;
     }
 
     RegistrationResult created;
-    created.fixedIndex = pair.fixedIndex;
-    created.movingIndex = pair.movingIndex;
+    created.fixedIndex = pair->fixedIndex;
+    created.movingIndex = pair->movingIndex;
     context.session.registrations.push_back(created);
     return &context.session.registrations.back();
 }
@@ -248,7 +360,7 @@ void ViewerPanel::Draw(AppContext& context, const ImVec2& size)
     ImGui::SameLine();
     if (ImGui::Button("1:1"))
     {
-        m_zoom = 1.0f;
+        m_zoom = m_lastFitScale > 0.0f ? 1.0f / m_lastFitScale : 1.0f;
     }
     ImGui::SameLine();
     if (ImGui::Button("Reset"))
@@ -260,6 +372,12 @@ void ViewerPanel::Draw(AppContext& context, const ImVec2& size)
     ImGui::PopID();
 
     ImGui::TextUnformatted("Mouse: wheel zoom, middle-button drag pan.");
+    if (m_content != ViewerContent::Preview)
+    {
+        ImGui::TextUnformatted(context.landmarkModeEnabled
+                                   ? "Landmarks: click to place/reposition, drag an existing point to adjust."
+                                   : "Landmarks mode is off.");
+    }
     ImGui::TextWrapped("%s", m_statusText.c_str());
     DrawImageCanvas(context, ImGui::GetContentRegionAvail());
     ImGui::EndChild();
@@ -270,11 +388,14 @@ void ViewerPanel::RefreshTexture(AppContext& context)
     cv::Mat image;
     const SliceRecord* sliceA = GetActiveSlice(context.session.stackA, context.session.projectPreferences.activeSliceA);
     const SliceRecord* sliceB = GetActiveSlice(context.session.stackB, context.session.projectPreferences.activeSliceB);
+    const RegistrationResult* currentRegistration = FindCurrentRegistration(context);
+    RegistrationResult previewHistorySelection;
     const RegistrationResult* registration =
-        (sliceA != nullptr && sliceB != nullptr)
-            ? FindRegistrationResult(context.session.registrations, sliceA->stackIndex, sliceB->stackIndex)
-            : nullptr;
-    const bool useAlignment = context.session.projectPreferences.useAlignmentPreview && registration != nullptr;
+        m_content == ViewerContent::Preview
+            ? ResolvePreviewRegistration(context, currentRegistration, previewHistorySelection)
+            : currentRegistration;
+    const bool useAlignmentPreview = context.session.projectPreferences.useAlignmentPreview &&
+                                     HasUsableTransform(registration);
     double currentTx = 0.0;
     double currentTy = 0.0;
     double currentTheta = 0.0;
@@ -323,11 +444,11 @@ void ViewerPanel::RefreshTexture(AppContext& context)
             return;
         }
 
-        if (m_loadedFilePath == slice->filePath && m_loadedUsedAlignment == useAlignment &&
+        if (m_loadedFilePath == slice->filePath &&
             m_loadedTx == currentTx && m_loadedTy == currentTy && m_loadedTheta == currentTheta &&
             m_loadedScale == currentScale)
         {
-            m_statusText = useAlignment ? "Stack B aligned: " + slice->fileName : "Stack B moving: " + slice->fileName;
+            m_statusText = "Stack B original: " + slice->fileName;
             return;
         }
 
@@ -340,23 +461,14 @@ void ViewerPanel::RefreshTexture(AppContext& context)
             return;
         }
 
-        cv::Mat displayImage = image;
-        if (useAlignment)
-        {
-            const cv::Size targetSize =
-                (sliceA != nullptr && sliceA->width > 0 && sliceA->height > 0) ? cv::Size(sliceA->width, sliceA->height)
-                                                                                : image.size();
-            displayImage = ApplyTransformToMoving(image, targetSize, registration->forward);
-        }
-
-        m_texture.Upload(displayImage);
+        m_texture.Upload(image);
         m_loadedFilePath = slice->filePath;
-        m_loadedUsedAlignment = useAlignment;
+        m_loadedUsedAlignment = false;
         m_loadedTx = currentTx;
         m_loadedTy = currentTy;
         m_loadedTheta = currentTheta;
         m_loadedScale = currentScale;
-        m_statusText = useAlignment ? "Stack B aligned: " + slice->fileName : "Stack B moving: " + slice->fileName;
+        m_statusText = "Stack B original: " + slice->fileName;
         return;
     }
 
@@ -376,7 +488,7 @@ void ViewerPanel::RefreshTexture(AppContext& context)
     const double registrationScore = registration != nullptr ? registration->score : -1.0;
 
     if (m_loadedSliceA == sliceA->stackIndex && m_loadedSliceB == sliceB->stackIndex && previewConfigUnchanged &&
-        m_loadedUsedAlignment == useAlignment && m_loadedRegistrationScore == registrationScore &&
+        m_loadedUsedAlignment == useAlignmentPreview && m_loadedRegistrationScore == registrationScore &&
         m_loadedTx == currentTx && m_loadedTy == currentTy && m_loadedTheta == currentTheta &&
         m_loadedScale == currentScale)
     {
@@ -398,7 +510,7 @@ void ViewerPanel::RefreshTexture(AppContext& context)
     }
 
     cv::Mat movingForPreview = imageB;
-    if (useAlignment)
+    if (useAlignmentPreview)
     {
         movingForPreview = ApplyTransformToMoving(imageB, imageA.size(), registration->forward);
     }
@@ -417,7 +529,7 @@ void ViewerPanel::RefreshTexture(AppContext& context)
     m_loadedPreviewMode = context.session.uiPreferences.previewMode;
     m_loadedBlendAlpha = context.session.uiPreferences.blendAlpha;
     m_loadedCheckerSize = context.session.uiPreferences.checkerSize;
-    m_loadedUsedAlignment = useAlignment;
+    m_loadedUsedAlignment = useAlignmentPreview;
     m_loadedRegistrationScore = registrationScore;
     m_loadedTx = currentTx;
     m_loadedTy = currentTy;
@@ -430,48 +542,37 @@ void ViewerPanel::RefreshTexture(AppContext& context)
 void ViewerPanel::DrawImageCanvas(AppContext& context, const ImVec2& canvasSize)
 {
     const ImVec2 canvasStart = ImGui::GetCursorScreenPos();
+    const ImVec2 canvasEnd(canvasStart.x + canvasSize.x, canvasStart.y + canvasSize.y);
     ImDrawList* drawList = ImGui::GetWindowDrawList();
-    drawList->AddRectFilled(canvasStart, ImVec2(canvasStart.x + canvasSize.x, canvasStart.y + canvasSize.y),
-                            IM_COL32(28, 31, 38, 255));
-    drawList->AddRect(canvasStart, ImVec2(canvasStart.x + canvasSize.x, canvasStart.y + canvasSize.y),
-                      IM_COL32(70, 76, 88, 255));
+    drawList->AddRectFilled(canvasStart, canvasEnd, IM_COL32(28, 31, 38, 255));
+    drawList->AddRect(canvasStart, canvasEnd, IM_COL32(70, 76, 88, 255));
+
+    ImGui::SetCursorScreenPos(canvasStart);
+    ImGui::InvisibleButton((m_title + "_canvas").c_str(), canvasSize);
+    const bool canvasHovered = ImGui::IsItemHovered();
 
     if (!m_texture.IsValid())
     {
         drawList->AddText(ImVec2(canvasStart.x + 12.0f, canvasStart.y + 12.0f), IM_COL32(220, 225, 232, 255),
                           "No image");
-        ImGui::Dummy(canvasSize);
         return;
     }
 
     const float baseWidth = static_cast<float>(m_texture.GetWidth());
     const float baseHeight = static_cast<float>(m_texture.GetHeight());
-    const float aspect = baseWidth / baseHeight;
-    float drawWidth = baseWidth * m_zoom;
-    float drawHeight = baseHeight * m_zoom;
-
     const float fitScale = (std::min)(canvasSize.x / baseWidth, canvasSize.y / baseHeight);
-    if (drawWidth > canvasSize.x * 4.0f || drawHeight > canvasSize.y * 4.0f)
-    {
-        drawWidth = baseWidth * fitScale * m_zoom;
-        drawHeight = drawWidth / aspect;
-    }
-
-    if (drawHeight > canvasSize.y * 4.0f)
-    {
-        drawHeight = baseHeight * fitScale * m_zoom;
-        drawWidth = drawHeight * aspect;
-    }
+    m_lastFitScale = fitScale > 0.0f ? fitScale : 1.0f;
+    const float drawWidth = baseWidth * m_lastFitScale * m_zoom;
+    const float drawHeight = baseHeight * m_lastFitScale * m_zoom;
 
     const ImVec2 center(canvasStart.x + canvasSize.x * 0.5f + m_panX, canvasStart.y + canvasSize.y * 0.5f + m_panY);
     const ImVec2 min(center.x - drawWidth * 0.5f, center.y - drawHeight * 0.5f);
     const ImVec2 max(center.x + drawWidth * 0.5f, center.y + drawHeight * 0.5f);
 
-    ImGui::SetCursorScreenPos(min);
-    ImGui::Image(reinterpret_cast<void*>(static_cast<intptr_t>(m_texture.GetId())), ImVec2(drawWidth, drawHeight));
-    const bool imageHovered = ImGui::IsItemHovered();
+    drawList->PushClipRect(canvasStart, canvasEnd, true);
+    drawList->AddImage(reinterpret_cast<void*>(static_cast<intptr_t>(m_texture.GetId())), min, max);
 
-    if (imageHovered)
+    if (canvasHovered)
     {
         const float wheel = ImGui::GetIO().MouseWheel;
         if (wheel != 0.0f)
@@ -493,20 +594,21 @@ void ViewerPanel::DrawImageCanvas(AppContext& context, const ImVec2& canvasSize)
         }
     }
 
-    RegistrationResult* registration = GetOrCreateCurrentRegistration(context);
-    const RegistrationResult* currentRegistration = FindRegistrationResult(
-        context.session.registrations,
-        context.session.projectPreferences.activeSliceA,
-        context.session.projectPreferences.activeSliceB);
-    const bool useAlignment = context.session.projectPreferences.useAlignmentPreview && currentRegistration != nullptr;
+    RegistrationResult* editableRegistration = context.landmarkModeEnabled ? GetOrCreateCurrentRegistration(context) : nullptr;
+    const RegistrationResult* currentRegistration = FindCurrentRegistration(context);
+    const RegistrationResult* displayedRegistration =
+        editableRegistration != nullptr ? editableRegistration : currentRegistration;
+    const bool useAlignment = m_content == ViewerContent::Preview &&
+                              context.session.projectPreferences.useAlignmentPreview &&
+                              HasUsableTransform(currentRegistration);
     int hoveredLandmarkIndex = -1;
     constexpr float kHitRadius = 10.0f;
 
-    if (registration != nullptr && m_content != ViewerContent::Preview)
+    if (displayedRegistration != nullptr && m_content != ViewerContent::Preview)
     {
-        for (int i = 0; i < static_cast<int>(registration->landmarks.size()); ++i)
+        for (int i = 0; i < static_cast<int>(displayedRegistration->landmarks.size()); ++i)
         {
-            LandmarkPair& landmark = registration->landmarks[i];
+            const LandmarkPair& landmark = displayedRegistration->landmarks[i];
             double pointX = 0.0;
             double pointY = 0.0;
 
@@ -524,6 +626,10 @@ void ViewerPanel::DrawImageCanvas(AppContext& context, const ImVec2& canvasSize)
             }
             else
             {
+                if (!HasFixedPoint(landmark))
+                {
+                    continue;
+                }
                 pointX = landmark.fixedX;
                 pointY = landmark.fixedY;
             }
@@ -548,7 +654,7 @@ void ViewerPanel::DrawImageCanvas(AppContext& context, const ImVec2& canvasSize)
         }
     }
 
-    if (registration != nullptr && m_content != ViewerContent::Preview && imageHovered &&
+    if (editableRegistration != nullptr && m_content != ViewerContent::Preview && canvasHovered &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Left) && hoveredLandmarkIndex >= 0)
     {
         context.landmarkEditState.selectedIndex = hoveredLandmarkIndex;
@@ -557,11 +663,11 @@ void ViewerPanel::DrawImageCanvas(AppContext& context, const ImVec2& canvasSize)
             m_content == ViewerContent::StackB ? LandmarkEditTarget::Moving : LandmarkEditTarget::Fixed;
     }
 
-    if (registration != nullptr && context.landmarkEditState.isDragging &&
+    if (editableRegistration != nullptr && context.landmarkEditState.isDragging &&
         ((m_content == ViewerContent::StackB && context.landmarkEditState.target == LandmarkEditTarget::Moving) ||
          (m_content == ViewerContent::StackA && context.landmarkEditState.target == LandmarkEditTarget::Fixed)) &&
         context.landmarkEditState.selectedIndex >= 0 &&
-        context.landmarkEditState.selectedIndex < static_cast<int>(registration->landmarks.size()))
+        context.landmarkEditState.selectedIndex < static_cast<int>(editableRegistration->landmarks.size()))
     {
         double imageX = 0.0;
         double imageY = 0.0;
@@ -569,7 +675,7 @@ void ViewerPanel::DrawImageCanvas(AppContext& context, const ImVec2& canvasSize)
         {
             const cv::Point2d landmarkPoint =
                 DisplayPointToLandmarkSpace(m_content, cv::Point2d(imageX, imageY), useAlignment, currentRegistration);
-            LandmarkPair& landmark = registration->landmarks[context.landmarkEditState.selectedIndex];
+            LandmarkPair& landmark = editableRegistration->landmarks[context.landmarkEditState.selectedIndex];
             if (m_content == ViewerContent::StackB)
             {
                 landmark.movingX = landmarkPoint.x;
@@ -580,6 +686,8 @@ void ViewerPanel::DrawImageCanvas(AppContext& context, const ImVec2& canvasSize)
                 landmark.fixedX = landmarkPoint.x;
                 landmark.fixedY = landmarkPoint.y;
             }
+
+            UpdateManualPreviewRegistration(*editableRegistration);
         }
     }
 
@@ -588,7 +696,8 @@ void ViewerPanel::DrawImageCanvas(AppContext& context, const ImVec2& canvasSize)
         context.landmarkEditState.isDragging = false;
     }
 
-    if (m_content != ViewerContent::Preview && imageHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
+    if (context.landmarkModeEnabled &&
+        m_content != ViewerContent::Preview && canvasHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
         hoveredLandmarkIndex < 0)
     {
         double imageX = 0.0;
@@ -597,57 +706,85 @@ void ViewerPanel::DrawImageCanvas(AppContext& context, const ImVec2& canvasSize)
         {
             const cv::Point2d landmarkPoint =
                 DisplayPointToLandmarkSpace(m_content, cv::Point2d(imageX, imageY), useAlignment, currentRegistration);
-            RegistrationResult* editableRegistration = GetOrCreateCurrentRegistration(context);
             if (editableRegistration != nullptr)
             {
-                if (m_content == ViewerContent::StackB)
+                const bool hasSelectedLandmark =
+                    context.landmarkEditState.selectedIndex >= 0 &&
+                    context.landmarkEditState.selectedIndex < static_cast<int>(editableRegistration->landmarks.size());
+
+                if (hasSelectedLandmark)
                 {
-                    context.pendingLandmarkPoint.hasMovingPoint = true;
-                    context.pendingLandmarkPoint.movingX = landmarkPoint.x;
-                    context.pendingLandmarkPoint.movingY = landmarkPoint.y;
-                    context.landmarkEditState.selectedIndex = -1;
-                    context.landmarkEditState.target = LandmarkEditTarget::None;
+                    LandmarkPair& landmark = editableRegistration->landmarks[context.landmarkEditState.selectedIndex];
+                    if (m_content == ViewerContent::StackB)
+                    {
+                        landmark.movingX = landmarkPoint.x;
+                        landmark.movingY = landmarkPoint.y;
+                        context.landmarkEditState.target = LandmarkEditTarget::Moving;
+                    }
+                    else
+                    {
+                        landmark.fixedX = landmarkPoint.x;
+                        landmark.fixedY = landmarkPoint.y;
+                        context.landmarkEditState.target = LandmarkEditTarget::Fixed;
+                    }
+                    UpdateManualPreviewRegistration(*editableRegistration);
                 }
-                else if (m_content == ViewerContent::StackA && context.pendingLandmarkPoint.hasMovingPoint)
+                else if (m_content == ViewerContent::StackB)
                 {
-                    LandmarkPair landmark;
-                    landmark.movingX = context.pendingLandmarkPoint.movingX;
-                    landmark.movingY = context.pendingLandmarkPoint.movingY;
-                    landmark.fixedX = landmarkPoint.x;
-                    landmark.fixedY = landmarkPoint.y;
-                    editableRegistration->landmarks.push_back(landmark);
-                    context.pendingLandmarkPoint.hasMovingPoint = false;
-                    context.landmarkEditState.selectedIndex = static_cast<int>(editableRegistration->landmarks.size()) - 1;
-                    context.landmarkEditState.target = LandmarkEditTarget::Fixed;
+                    const int incompleteIndex = FindFirstIncompleteLandmarkIndex(*editableRegistration);
+                    if (incompleteIndex >= 0)
+                    {
+                        LandmarkPair& landmark = editableRegistration->landmarks[incompleteIndex];
+                        landmark.movingX = landmarkPoint.x;
+                        landmark.movingY = landmarkPoint.y;
+                        context.landmarkEditState.selectedIndex = incompleteIndex;
+                    }
+                    else
+                    {
+                        LandmarkPair landmark;
+                        landmark.movingX = landmarkPoint.x;
+                        landmark.movingY = landmarkPoint.y;
+                        landmark.fixedX = std::numeric_limits<double>::quiet_NaN();
+                        landmark.fixedY = std::numeric_limits<double>::quiet_NaN();
+                        editableRegistration->landmarks.push_back(landmark);
+                        context.landmarkEditState.selectedIndex =
+                            static_cast<int>(editableRegistration->landmarks.size()) - 1;
+                    }
+                    context.landmarkEditState.target = LandmarkEditTarget::Moving;
+                }
+                else if (m_content == ViewerContent::StackA)
+                {
+                    int targetIndex = context.landmarkEditState.selectedIndex;
+                    if (targetIndex < 0 || targetIndex >= static_cast<int>(editableRegistration->landmarks.size()))
+                    {
+                        targetIndex = FindFirstIncompleteLandmarkIndex(*editableRegistration);
+                    }
+
+                    if (targetIndex >= 0)
+                    {
+                        LandmarkPair& landmark = editableRegistration->landmarks[targetIndex];
+                        landmark.fixedX = landmarkPoint.x;
+                        landmark.fixedY = landmarkPoint.y;
+                        context.landmarkEditState.selectedIndex = targetIndex;
+                        context.landmarkEditState.target = LandmarkEditTarget::Fixed;
+                        UpdateManualPreviewRegistration(*editableRegistration);
+                    }
                 }
             }
         }
     }
 
-    if (registration != nullptr && context.landmarkEditState.selectedIndex >= 0 &&
-        context.landmarkEditState.selectedIndex < static_cast<int>(registration->landmarks.size()) &&
+    if (editableRegistration != nullptr && context.landmarkEditState.selectedIndex >= 0 &&
+        context.landmarkEditState.selectedIndex < static_cast<int>(editableRegistration->landmarks.size()) &&
         ImGui::IsKeyPressed(ImGuiKey_Delete))
     {
-        registration->landmarks.erase(registration->landmarks.begin() + context.landmarkEditState.selectedIndex);
+        editableRegistration->landmarks.erase(editableRegistration->landmarks.begin() + context.landmarkEditState.selectedIndex);
         context.landmarkEditState.selectedIndex = -1;
         context.landmarkEditState.target = LandmarkEditTarget::None;
         context.landmarkEditState.isDragging = false;
+        UpdateManualPreviewRegistration(*editableRegistration);
     }
 
-    if (m_content == ViewerContent::StackB && context.pendingLandmarkPoint.hasMovingPoint)
-    {
-        const ImVec2 pendingPoint = ToScreenPoint(context.pendingLandmarkPoint.movingX,
-                                                  context.pendingLandmarkPoint.movingY,
-                                                  min,
-                                                  max,
-                                                  m_texture.GetWidth(),
-                                                  m_texture.GetHeight());
-        drawList->AddCircle(pendingPoint, 8.0f, IM_COL32(90, 220, 255, 255), 0, 2.0f);
-        drawList->AddText(ImVec2(pendingPoint.x + 8.0f, pendingPoint.y - 8.0f), IM_COL32(180, 240, 255, 255),
-                          "pending");
-    }
-
-    ImGui::SetCursorScreenPos(ImVec2(canvasStart.x, canvasStart.y));
-    ImGui::Dummy(canvasSize);
+    drawList->PopClipRect();
 }
 } // namespace align

@@ -2,6 +2,20 @@
 
 namespace align
 {
+void AppendHistorySnapshot(RegistrationResult& registration, const std::string& label)
+{
+    RegistrationSnapshot snapshot;
+    snapshot.label = label;
+    snapshot.timestamp = registration.timestamp;
+    snapshot.transformType = registration.transformType;
+    snapshot.forward = registration.forward;
+    snapshot.inverse = registration.inverse;
+    snapshot.score = registration.score;
+    snapshot.manualRmsError = registration.manualRmsError;
+    snapshot.isManual = registration.isManual;
+    registration.history.push_back(std::move(snapshot));
+}
+
 RegistrationResult* FindRegistrationResult(std::vector<RegistrationResult>& registrations,
                                            SliceIndex fixedIndex,
                                            SliceIndex movingIndex)

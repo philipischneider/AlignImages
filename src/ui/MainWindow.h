@@ -50,6 +50,15 @@ public:
         int outlierCount = 0;
     };
 
+    struct CurrentAlignmentTaskResult
+    {
+        Result result;
+        RegistrationResult registration;
+        int pairListIndex = -1;
+        PairStatus pairStatus = PairStatus::Candidate;
+        WorkflowPhase workflowPhase = WorkflowPhase::InitialAlignment;
+    };
+
     struct BatchTaskProgress
     {
         std::atomic<bool> cancelRequested {false};
@@ -74,6 +83,32 @@ public:
         bool cancelled = false;
     };
 
+    // Generic progress tracker — shared between prior-refinement and export-batch tasks.
+    struct GenericTaskProgress
+    {
+        std::atomic<bool> cancelRequested {false};
+        std::atomic<int>  attempted {0};
+        std::atomic<int>  total {0};
+        std::mutex        statusMutex;
+        std::string       statusMessage;
+    };
+
+    struct PriorRefinementTaskResult
+    {
+        Result result;
+        std::vector<RegistrationResult> registrations;
+        int refined = 0;
+        bool cancelled = false;
+    };
+
+    struct ExportBatchTaskResult
+    {
+        Result result;
+        int exported = 0;
+        int total = 0;
+        bool cancelled = false;
+    };
+
 private:
 
     void DrawMenuBar(AppContext& context);
@@ -87,6 +122,8 @@ private:
     void RunCurrentAlignment(AppContext& context);
     void RunBatchAlignment(AppContext& context);
     void CancelBatchAlignment(AppContext& context);
+    void CancelPriorRefinement();
+    void CancelExportBatch();
     void LoadSession(AppContext& context);
     void ExportCurrentAligned(AppContext& context);
     void ExportBatchAligned(AppContext& context);
@@ -94,6 +131,8 @@ private:
     void RunPriorRefinement(AppContext& context);
     void ApplyManualLandmarks(AppContext& context);
     void DrawLandmarkEditor(AppContext& context);
+    void DrawMetricsGraph(AppContext& context);
+    void DrawOperationHistory(AppContext& context);
     RegistrationResult* GetOrCreateCurrentRegistration(AppContext& context);
     void StoreRegistrationResult(AppContext& context, const RegistrationResult& computed);
     BatchSummary BuildBatchSummary(const AppContext& context) const;
@@ -110,10 +149,18 @@ private:
     RegistrationEngine m_registrationEngine;
     LandmarkRegistration m_landmarkRegistration;
     ExportController m_exportController;
-    std::optional<std::future<StackLoadTaskResult>> m_stackLoadTask;
-    std::optional<std::future<ConvergenceTaskResult>> m_convergenceTask;
-    std::optional<std::future<BatchTaskResult>> m_batchTask;
-    std::shared_ptr<BatchTaskProgress> m_batchTaskProgress;
+
+    std::optional<std::future<StackLoadTaskResult>>        m_stackLoadTask;
+    std::optional<std::future<CurrentAlignmentTaskResult>> m_currentAlignmentTask;
+    std::optional<std::future<ConvergenceTaskResult>>      m_convergenceTask;
+    std::optional<std::future<BatchTaskResult>>            m_batchTask;
+    std::optional<std::future<PriorRefinementTaskResult>>  m_priorRefinementTask;
+    std::optional<std::future<ExportBatchTaskResult>>      m_exportBatchTask;
+
+    std::shared_ptr<BatchTaskProgress>   m_batchTaskProgress;
+    std::shared_ptr<GenericTaskProgress> m_priorRefinementProgress;
+    std::shared_ptr<GenericTaskProgress> m_exportBatchProgress;
+
     std::string m_backgroundStatus;
     std::string m_lastMessage;
 };

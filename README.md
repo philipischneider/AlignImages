@@ -36,19 +36,34 @@ O projeto foi desenhado para Windows e hoje já cobre:
 
 ## Build no Windows
 
-O projeto usa CMake e foi testado com build fora da pasta do OneDrive para evitar problemas de lock e permissões.
+O projeto usa CMake com presets definidos em `CMakePresets.json`. O diretório de build fica sempre em `build/` dentro da raiz do repositório.
 
-Exemplo:
+### Configurar e compilar (primeira vez)
 
 ```powershell
-cmake -S . -B C:\temp\AlignImagesBuild -DOpenCV_DIR=C:/vcpkg/installed/x64-windows/share/opencv4
-cmake --build C:\temp\AlignImagesBuild --config Debug
+cmake --preset default          # configura Release em build/
+cmake --build --preset release  # compila Release
 ```
 
-Executável esperado:
+Para Debug:
+
+```powershell
+cmake --preset debug            # configura Debug em build/ (mesmo dir)
+cmake --build --preset debug    # compila Debug
+```
+
+### Compilar incrementalmente (já configurado)
+
+```powershell
+cmake --build build --config Release
+cmake --build build --config Debug
+```
+
+Executáveis gerados:
 
 ```text
-C:\temp\AlignImagesBuild\Debug\AlignImages.exe
+build\Release\AlignImages.exe
+build\Debug\AlignImages.exe
 ```
 
 ## Estado atual

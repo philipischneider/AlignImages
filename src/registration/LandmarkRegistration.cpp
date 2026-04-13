@@ -4,6 +4,7 @@
 #include <opencv2/core.hpp>
 
 #include <cmath>
+#include <numeric>
 #include <vector>
 
 namespace align
@@ -55,6 +56,64 @@ double ComputeRmsError(const std::vector<cv::Point2f>& moving,
 
     return std::sqrt(total / static_cast<double>(fixed.size()));
 }
+
+cv::Mat EstimateSimilarityLeastSquares(const std::vector<cv::Point2f>& moving,
+                                       const std::vector<cv::Point2f>& fixed)
+{
+    if (moving.size() != fixed.size() || moving.size() < 2)
+    {
+        return {};
+    }
+
+    cv::Point2d movingCenter(0.0, 0.0);
+    cv::Point2d fixedCenter(0.0, 0.0);
+    for (size_t i = 0; i < moving.size(); ++i)
+    {
+        movingCenter.x += moving[i].x;
+        movingCenter.y += moving[i].y;
+        fixedCenter.x += fixed[i].x;
+        fixedCenter.y += fixed[i].y;
+    }
+
+    const double count = static_cast<double>(moving.size());
+    movingCenter.x /= count;
+    movingCenter.y /= count;
+    fixedCenter.x /= count;
+    fixedCenter.y /= count;
+
+    double dot = 0.0;
+    double cross = 0.0;
+    double movingNormSq = 0.0;
+
+    for (size_t i = 0; i < moving.size(); ++i)
+    {
+        const double mx = static_cast<double>(moving[i].x) - movingCenter.x;
+        const double my = static_cast<double>(moving[i].y) - movingCenter.y;
+        const double fx = static_cast<double>(fixed[i].x) - fixedCenter.x;
+        const double fy = static_cast<double>(fixed[i].y) - fixedCenter.y;
+
+        dot += mx * fx + my * fy;
+        cross += mx * fy - my * fx;
+        movingNormSq += mx * mx + my * my;
+    }
+
+    if (movingNormSq <= 1e-9)
+    {
+        return {};
+    }
+
+    const double scale = std::sqrt(dot * dot + cross * cross) / movingNormSq;
+    const double theta = std::atan2(cross, dot);
+    const double c = std::cos(theta);
+    const double s = std::sin(theta);
+
+    const double tx = fixedCenter.x - scale * (c * movingCenter.x - s * movingCenter.y);
+    const double ty = fixedCenter.y - scale * (s * movingCenter.x + c * movingCenter.y);
+
+    return (cv::Mat_<double>(2, 3) <<
+        scale * c, -scale * s, tx,
+        scale * s,  scale * c, ty);
+}
 } // namespace
 
 Result LandmarkRegistration::ComputeFromLandmarks(RegistrationResult& registration) const
@@ -75,8 +134,7 @@ Result LandmarkRegistration::ComputeFromLandmarks(RegistrationResult& registrati
         fixedPoints.emplace_back(static_cast<float>(landmark.fixedX), static_cast<float>(landmark.fixedY));
     }
 
-    cv::Mat inliers;
-    cv::Mat affine = cv::estimateAffinePartial2D(movingPoints, fixedPoints, inliers, cv::RANSAC, 3.0);
+    cv::Mat affine = EstimateSimilarityLeastSquares(movingPoints, fixedPoints);
     if (affine.empty())
     {
         return Result{false, "Could not estimate a similarity transform from the landmarks."};

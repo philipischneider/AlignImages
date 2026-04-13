@@ -24,7 +24,23 @@ struct IterationRecord
     double ty = 0.0;
     double theta = 0.0;
     double scale = 1.0;
+    // Affine mode: sx and sy are independent scale factors (>0).
+    // -1.0 means not set — interpret scale as sx == sy (similarity mode).
+    double sx = -1.0;
+    double sy = -1.0;
     bool converged = false;
+};
+
+struct RegistrationSnapshot
+{
+    std::string label;
+    std::string timestamp;
+    std::string transformType = "similarity";
+    Transform2D forward;
+    Transform2D inverse;
+    double score = 0.0;
+    double manualRmsError = 0.0;
+    bool isManual = false;
 };
 
 struct RegistrationResult
@@ -45,6 +61,15 @@ struct RegistrationResult
     double priorTy = 0.0;
     double priorTheta = 0.0;
     double priorScale = 1.0;
+    // Affine priors — set by ConvergenceAnalyzer when sx/sy data is available.
+    // -1.0 means not set; fall back to priorScale for both axes.
+    double priorSx = -1.0;
+    double priorSy = -1.0;
+    // Audit trail
+    std::string timestamp;         // ISO 8601 (local time) of the last operation, e.g. "2026-04-12T14:30:00"
+    std::string algorithmVersion;  // e.g. "similarity_v1", "affine_v1", "manual_landmarks"
+    std::vector<std::string> operationLog; // chronological list, e.g. "2026-04-12T14:30 initial_auto score=0.71"
+    std::vector<RegistrationSnapshot> history;
     std::vector<IterationRecord> iterations;
     std::vector<LandmarkPair> landmarks;
 };
@@ -55,4 +80,5 @@ RegistrationResult* FindRegistrationResult(std::vector<RegistrationResult>& regi
 const RegistrationResult* FindRegistrationResult(const std::vector<RegistrationResult>& registrations,
                                                  SliceIndex fixedIndex,
                                                  SliceIndex movingIndex);
+void AppendHistorySnapshot(RegistrationResult& registration, const std::string& label);
 } // namespace align
