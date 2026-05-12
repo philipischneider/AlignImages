@@ -228,6 +228,7 @@ Result SessionSerializer::Save(const SessionModel& session, const std::filesyste
             {"manual_rms_error", registration.manualRmsError},
             {"converged", registration.converged},
             {"is_manual", registration.isManual},
+            {"is_interpolated", registration.isInterpolated},
             {"has_convergence_prior", registration.hasConvergencePrior},
             {"convergence_outlier", registration.convergenceOutlier},
             {"refined_with_prior", registration.refinedWithPrior},
@@ -458,6 +459,7 @@ Result SessionSerializer::Load(const std::filesystem::path& filePath, SessionMod
             registration.manualRmsError = item.value("manual_rms_error", 0.0);
             registration.converged = item.value("converged", false);
             registration.isManual = item.value("is_manual", false);
+            registration.isInterpolated = item.value("is_interpolated", false);
             registration.hasConvergencePrior = item.value("has_convergence_prior", false);
             registration.convergenceOutlier = item.value("convergence_outlier", false);
             registration.refinedWithPrior = item.value("refined_with_prior", false);

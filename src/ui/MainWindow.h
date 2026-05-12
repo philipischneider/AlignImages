@@ -8,6 +8,7 @@
 #include "registration/ConvergenceAnalyzer.h"
 #include "registration/LandmarkRegistration.h"
 #include "registration/RegistrationEngine.h"
+#include "registration/TransformInterpolator.h"
 #include "timeline/TimelinePanel.h"
 #include "viewer/ViewerPanel.h"
 
@@ -109,6 +110,14 @@ public:
         bool cancelled = false;
     };
 
+    struct AnimatedExportTaskResult
+    {
+        Result result;
+        int framesWritten = 0;
+        int total = 0;
+        bool cancelled = false;
+    };
+
 private:
 
     void DrawMenuBar(AppContext& context);
@@ -132,6 +141,9 @@ private:
     void ApplyManualLandmarks(AppContext& context);
     void PropagateManualLandmarksToAll(AppContext& context);
     void PropagateManualLandmarksToInterval(AppContext& context, int fromPairIdx, int toPairIdx);
+    void RunTransformInterpolation(AppContext& context);
+    void ExportAnimatedPreview(AppContext& context);
+    void CancelAnimatedExport();
     void DrawLandmarkEditor(AppContext& context);
     void DrawOperationStack(AppContext& context);
     void DrawMetricsGraph(AppContext& context);
@@ -159,10 +171,12 @@ private:
     std::optional<std::future<BatchTaskResult>>            m_batchTask;
     std::optional<std::future<PriorRefinementTaskResult>>  m_priorRefinementTask;
     std::optional<std::future<ExportBatchTaskResult>>      m_exportBatchTask;
+    std::optional<std::future<AnimatedExportTaskResult>>   m_animatedExportTask;
 
     std::shared_ptr<BatchTaskProgress>   m_batchTaskProgress;
     std::shared_ptr<GenericTaskProgress> m_priorRefinementProgress;
     std::shared_ptr<GenericTaskProgress> m_exportBatchProgress;
+    std::shared_ptr<GenericTaskProgress> m_animatedExportProgress;
 
     std::string m_backgroundStatus;
     std::string m_lastMessage;

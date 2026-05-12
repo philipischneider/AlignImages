@@ -6,6 +6,9 @@
 #include "imgui.h"
 
 #include <opencv2/core.hpp>
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
+#include <opencv2/videoio.hpp>
 
 #include <algorithm>
 #include <array>
@@ -255,9 +258,11 @@ const char* OperationKindLabel(OperationKind kind)
     case OperationKind::CurrentAutoAlignment: return "Current Auto";
     case OperationKind::ManualLandmarks:      return "Manual Landmarks";
     case OperationKind::PriorRefinement:      return "Prior Refinement";
-    case OperationKind::BatchExport:          return "Batch Export";
-    case OperationKind::ConvergenceAnalysis:  return "Convergence";
-    default:                                  return "Operation";
+    case OperationKind::BatchExport:           return "Batch Export";
+    case OperationKind::ConvergenceAnalysis:   return "Convergence";
+    case OperationKind::LandmarkInterpolation: return "Interpolation";
+    case OperationKind::AnimatedExport:        return "Animated Export";
+    default:                                   return "Operation";
     }
 }
 
@@ -567,6 +572,63 @@ void MainWindow::DrawLeftPanel(AppContext& context, GLFWwindow* window)
     {
         ExportBatchAligned(context);
     }
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Transform Interpolation");
+    ShowHoveredHelp("Fills slices between landmark/auto-registration anchors with linearly interpolated transforms. Only gaps without a real result are filled.");
+    if (ImGui::Button("Interpolate Between Anchors"))
+    {
+        RunTransformInterpolation(context);
+    }
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Animated Preview Export");
+    ShowHoveredHelp("Renders a video where each frame is the blending preview for one slice pair. Pairs without a transform show the raw images.");
+    {
+        AnimatedExportSettings& anim = context.session.animatedExport;
+        const int maxPair = static_cast<int>(context.session.pairing.pairs.size()) - 1;
+        if (anim.endPairIndex < 0 || anim.endPairIndex > maxPair)
+            anim.endPairIndex = maxPair;
+        ImGui::SliderInt("Start Pair##anim", &anim.startPairIndex, 0, (std::max)(0, maxPair));
+        ImGui::SliderInt("End Pair##anim",   &anim.endPairIndex,   0, (std::max)(0, maxPair));
+        if (anim.startPairIndex > anim.endPairIndex)
+            anim.startPairIndex = anim.endPairIndex;
+        ImGui::SliderInt("FPS##anim", &anim.fps, 1, 60);
+        ImGui::Checkbox("Use current preview settings##anim", &anim.useCurrentPreviewMode);
+        if (!anim.useCurrentPreviewMode)
+            ImGui::SliderFloat("Blend Alpha##anim", &anim.blendAlpha, 0.0f, 1.0f, "%.2f");
+
+        if (m_animatedExportTask.has_value())
+        {
+            if (ImGui::Button("Cancel Animated Export"))
+            {
+                CancelAnimatedExport();
+            }
+            if (m_animatedExportProgress != nullptr)
+            {
+                const int attempted = m_animatedExportProgress->attempted.load();
+                const int total     = m_animatedExportProgress->total.load();
+                const float frac    = total > 0 ? static_cast<float>(attempted) / static_cast<float>(total) : 0.0f;
+                ImGui::ProgressBar(frac, ImVec2(-1.0f, 0.0f));
+                ImGui::Text("Frames: %d / %d", attempted, total);
+                std::string status;
+                {
+                    std::scoped_lock lock(m_animatedExportProgress->statusMutex);
+                    status = m_animatedExportProgress->statusMessage;
+                }
+                if (!status.empty())
+                    ImGui::TextWrapped("%s", status.c_str());
+            }
+        }
+        else
+        {
+            if (ImGui::Button("Export Animated Preview"))
+            {
+                ExportAnimatedPreview(context);
+            }
+        }
+    }
+
     if (ImGui::Button(context.landmarkModeEnabled ? "Disable Landmark Mode" : "Enable Landmark Mode"))
     {
         context.landmarkModeEnabled = !context.landmarkModeEnabled;
@@ -2333,6 +2395,30 @@ void MainWindow::ProcessAsyncTasks(AppContext& context)
                             std::to_string(result.exported) + ".";
         }
     }
+
+    if (m_animatedExportTask.has_value() &&
+        m_animatedExportTask->wait_for(0ms) == std::future_status::ready)
+    {
+        AnimatedExportTaskResult result = m_animatedExportTask->get();
+        m_animatedExportTask.reset();
+        m_animatedExportProgress.reset();
+        m_backgroundStatus.clear();
+
+        if (!result.result.ok)
+        {
+            m_lastMessage = "Animated export failed: " + result.result.message;
+        }
+        else if (result.cancelled)
+        {
+            m_lastMessage = "Animated export cancelled. Frames written: " +
+                            std::to_string(result.framesWritten) + ".";
+        }
+        else
+        {
+            m_lastMessage = "Animated export finished. Frames: " +
+                            std::to_string(result.framesWritten) + ".";
+        }
+    }
 }
 
 bool MainWindow::HasBackgroundTask() const
@@ -2342,7 +2428,226 @@ bool MainWindow::HasBackgroundTask() const
            m_convergenceTask.has_value()      ||
            m_batchTask.has_value()            ||
            m_priorRefinementTask.has_value()  ||
-           m_exportBatchTask.has_value();
+           m_exportBatchTask.has_value()      ||
+           m_animatedExportTask.has_value();
+}
+
+void MainWindow::RunTransformInterpolation(AppContext& context)
+{
+    const int count = ApplyTransformInterpolation(context.session.pairing.pairs,
+                                                  context.session.registrations);
+    if (count == 0)
+    {
+        m_lastMessage = "Interpolation: no gaps found between anchor registrations (need at least 2 converged or manual results).";
+        return;
+    }
+
+    std::vector<OperationPairRef> pairs;
+    for (const RegistrationResult& reg : context.session.registrations)
+    {
+        if (reg.isInterpolated)
+            pairs.push_back({reg.fixedIndex, reg.movingIndex});
+    }
+    AppendOperation(context.session,
+                    OperationKind::LandmarkInterpolation,
+                    OperationScope::Global,
+                    "Interpolate between anchors",
+                    "linear_similarity_interpolation",
+                    pairs);
+
+    m_lastMessage = "Interpolation complete. " + std::to_string(count) + " slices filled.";
+}
+
+void MainWindow::ExportAnimatedPreview(AppContext& context)
+{
+    if (HasBackgroundTask())
+    {
+        m_lastMessage = "Wait for the current background task to finish before starting animated export.";
+        return;
+    }
+
+    const auto savePath = ShowSaveFileDialog(L"Save Animated Preview", L"avi",
+                                             L"AVI Video", L"*.avi",
+                                             L"animated_preview.avi");
+    if (!savePath.has_value())
+        return;
+
+    const AnimatedExportSettings anim  = context.session.animatedExport;
+    std::vector<PairRecord>        pairs         = context.session.pairing.pairs;
+    std::vector<RegistrationResult> registrations = context.session.registrations;
+    const std::vector<SliceRecord>  fixedSlices   = context.session.stackA.slices;
+    const std::vector<SliceRecord>  movingSlices  = context.session.stackB.slices;
+    const std::filesystem::path     outputPath    = *savePath;
+    const UiPreferences             uiPrefs       = context.session.uiPreferences;
+
+    const int startIdx = anim.startPairIndex;
+    const int endIdx   = anim.endPairIndex < 0 ? static_cast<int>(pairs.size()) - 1 : anim.endPairIndex;
+    const int total    = (std::max)(0, endIdx - startIdx + 1);
+
+    auto progress = std::make_shared<GenericTaskProgress>();
+    progress->total.store(total);
+    m_animatedExportProgress = progress;
+    m_backgroundStatus = "Animated export running...";
+
+    m_animatedExportTask = std::async(
+        std::launch::async,
+        [pairs, registrations, fixedSlices, movingSlices, outputPath,
+         anim, uiPrefs, startIdx, endIdx, total, progress]() mutable
+        {
+            using namespace cv;
+            AnimatedExportTaskResult taskResult;
+            taskResult.total = total;
+
+            // Determine output resolution from the first valid pair's fixed image.
+            Size frameSize(1024, 768);
+            for (int i = startIdx; i <= endIdx; ++i)
+            {
+                if (i < 0 || i >= static_cast<int>(pairs.size())) continue;
+                const PairRecord& pair = pairs[i];
+                if (!pair.valid) continue;
+                if (pair.fixedIndex < 0 || pair.fixedIndex >= static_cast<int>(fixedSlices.size())) continue;
+                Mat probe = imread(fixedSlices[pair.fixedIndex].filePath, IMREAD_COLOR);
+                if (!probe.empty())
+                {
+                    frameSize = probe.size();
+                    break;
+                }
+            }
+
+            const int fourcc = VideoWriter::fourcc('M', 'J', 'P', 'G');
+            VideoWriter writer(outputPath.string(), fourcc, static_cast<double>(anim.fps), frameSize, true);
+            if (!writer.isOpened())
+            {
+                taskResult.result = {false, "Could not open VideoWriter for: " + outputPath.string()};
+                return taskResult;
+            }
+
+            ImageLoader loader;
+            UiPreferences renderPrefs = uiPrefs;
+            if (!anim.useCurrentPreviewMode)
+            {
+                renderPrefs.previewMode = PreviewMode::Blend;
+                renderPrefs.blendAlpha  = anim.blendAlpha;
+            }
+
+            for (int i = startIdx; i <= endIdx; ++i)
+            {
+                if (progress->cancelRequested.load())
+                {
+                    taskResult.cancelled = true;
+                    break;
+                }
+
+                {
+                    std::scoped_lock lock(progress->statusMutex);
+                    progress->statusMessage = "Pair " + std::to_string(i);
+                }
+
+                Mat frame;
+
+                if (i >= 0 && i < static_cast<int>(pairs.size()))
+                {
+                    const PairRecord& pair = pairs[i];
+                    if (pair.valid &&
+                        pair.fixedIndex  >= 0 && pair.fixedIndex  < static_cast<int>(fixedSlices.size()) &&
+                        pair.movingIndex >= 0 && pair.movingIndex < static_cast<int>(movingSlices.size()))
+                    {
+                        Mat imageA, imageB;
+                        loader.LoadColorImage(fixedSlices[pair.fixedIndex].filePath,   imageA);
+                        loader.LoadColorImage(movingSlices[pair.movingIndex].filePath, imageB);
+
+                        if (!imageA.empty() && !imageB.empty())
+                        {
+                            const RegistrationResult* reg =
+                                FindRegistrationResult(registrations, pair.fixedIndex, pair.movingIndex);
+                            const bool hasTransform = reg != nullptr &&
+                                (reg->converged || reg->isManual || !reg->iterations.empty());
+
+                            Mat movingWarped = imageB;
+                            if (hasTransform)
+                            {
+                                Mat affine = (Mat_<double>(2, 3) <<
+                                    reg->forward.matrix[0], reg->forward.matrix[1], reg->forward.matrix[2],
+                                    reg->forward.matrix[3], reg->forward.matrix[4], reg->forward.matrix[5]);
+                                warpAffine(imageB, movingWarped, affine, imageA.size(),
+                                           INTER_LINEAR, BORDER_CONSTANT, Scalar(0, 0, 0));
+                            }
+
+                            // BuildPreviewImage logic inlined (avoids sharing the free function across TUs)
+                            Mat resizedB;
+                            resize(movingWarped, resizedB, imageA.size(), 0.0, 0.0, INTER_LINEAR);
+
+                            switch (renderPrefs.previewMode)
+                            {
+                            case PreviewMode::Blend:
+                                addWeighted(imageA, 1.0 - renderPrefs.blendAlpha,
+                                            resizedB, renderPrefs.blendAlpha, 0.0, frame);
+                                break;
+                            case PreviewMode::Checkerboard:
+                            {
+                                frame = imageA.clone();
+                                const int tile = (std::max)(4, renderPrefs.checkerSize);
+                                for (int y = 0; y < frame.rows; y += tile)
+                                {
+                                    for (int x = 0; x < frame.cols; x += tile)
+                                    {
+                                        if (((x / tile) + (y / tile)) % 2 == 0) continue;
+                                        const int w = (std::min)(tile, frame.cols - x);
+                                        const int h = (std::min)(tile, frame.rows - y);
+                                        resizedB(Rect(x, y, w, h)).copyTo(frame(Rect(x, y, w, h)));
+                                    }
+                                }
+                                break;
+                            }
+                            case PreviewMode::Difference:
+                                absdiff(imageA, resizedB, frame);
+                                break;
+                            case PreviewMode::Multiply:
+                            {
+                                Mat fa, fb;
+                                imageA.convertTo(fa,  CV_32FC3, 1.0 / 255.0);
+                                resizedB.convertTo(fb, CV_32FC3, 1.0 / 255.0);
+                                multiply(fa, fb, frame);
+                                frame.convertTo(frame, CV_8UC3, 255.0);
+                                break;
+                            }
+                            default:
+                                frame = imageA.clone();
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if (frame.empty())
+                {
+                    frame = Mat::zeros(frameSize, CV_8UC3);
+                }
+                else if (frame.size() != frameSize)
+                {
+                    resize(frame, frame, frameSize, 0.0, 0.0, INTER_LINEAR);
+                }
+
+                writer.write(frame);
+                ++taskResult.framesWritten;
+                progress->attempted.fetch_add(1);
+            }
+
+            writer.release();
+            return taskResult;
+        });
+
+    m_lastMessage = "Animated export started.";
+}
+
+void MainWindow::CancelAnimatedExport()
+{
+    if (m_animatedExportProgress != nullptr)
+    {
+        m_animatedExportProgress->cancelRequested.store(true);
+        std::scoped_lock lock(m_animatedExportProgress->statusMutex);
+        m_animatedExportProgress->statusMessage = "Cancellation requested...";
+    }
 }
 
 // ──────────────────────────────────────────────────────────────

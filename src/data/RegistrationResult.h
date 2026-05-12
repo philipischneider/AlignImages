@@ -58,6 +58,7 @@ struct RegistrationResult
     bool hasConvergencePrior = false;
     bool convergenceOutlier = false;
     bool refinedWithPrior = false;
+    bool isInterpolated = false;
     double priorTx = 0.0;
     double priorTy = 0.0;
     double priorTheta = 0.0;

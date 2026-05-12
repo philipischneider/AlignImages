@@ -35,6 +35,7 @@ set(ALIGN_IMAGES_SOURCES
     src/registration/ConvergenceAnalyzer.cpp
     src/registration/RegistrationEngine.cpp
     src/registration/LandmarkRegistration.cpp
+    src/registration/TransformInterpolator.cpp
     src/timeline/TimelinePanel.cpp
     src/ui/MainWindow.cpp
     src/viewer/ImageTexture.cpp

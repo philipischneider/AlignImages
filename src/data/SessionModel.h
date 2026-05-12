@@ -40,7 +40,9 @@ enum class OperationKind
     ManualLandmarks,
     PriorRefinement,
     BatchExport,
-    ConvergenceAnalysis
+    ConvergenceAnalysis,
+    LandmarkInterpolation,
+    AnimatedExport
 };
 
 enum class OperationScope
@@ -82,6 +84,15 @@ struct UiPreferences
     float timelineHeight = 260.0f;
 };
 
+struct AnimatedExportSettings
+{
+    int fps = 10;
+    int startPairIndex = 0;
+    int endPairIndex = -1;  // -1 means "last valid pair"
+    bool useCurrentPreviewMode = true;
+    float blendAlpha = 0.5f;
+};
+
 struct ProjectPreferences
 {
     std::string registrationPreset = "ct_photo_initial";
@@ -113,6 +124,7 @@ struct SessionModel
     int nextOperationId = 1;
     UiPreferences uiPreferences;
     ProjectPreferences projectPreferences;
+    AnimatedExportSettings animatedExport;
 };
 
 SessionModel CreateDefaultSession();
