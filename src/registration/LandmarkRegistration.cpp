@@ -118,11 +118,6 @@ cv::Mat EstimateSimilarityLeastSquares(const std::vector<cv::Point2f>& moving,
 
 Result LandmarkRegistration::ComputeFromLandmarks(RegistrationResult& registration) const
 {
-    if (registration.landmarks.size() < 2)
-    {
-        return Result{false, "At least two landmark pairs are required."};
-    }
-
     std::vector<cv::Point2f> movingPoints;
     std::vector<cv::Point2f> fixedPoints;
     movingPoints.reserve(registration.landmarks.size());
@@ -130,8 +125,15 @@ Result LandmarkRegistration::ComputeFromLandmarks(RegistrationResult& registrati
 
     for (const LandmarkPair& landmark : registration.landmarks)
     {
+        if (!std::isfinite(landmark.fixedX) || !std::isfinite(landmark.fixedY))
+            continue;
         movingPoints.emplace_back(static_cast<float>(landmark.movingX), static_cast<float>(landmark.movingY));
         fixedPoints.emplace_back(static_cast<float>(landmark.fixedX), static_cast<float>(landmark.fixedY));
+    }
+
+    if (movingPoints.size() < 2)
+    {
+        return Result{false, "At least two complete landmark pairs are required."};
     }
 
     cv::Mat affine = EstimateSimilarityLeastSquares(movingPoints, fixedPoints);

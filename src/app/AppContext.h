@@ -45,6 +45,7 @@ struct AppContext
     bool showDemoWindow = false;
     bool landmarkModeEnabled = false;
     int selectedHistoryIndex = -1;
+    int selectedOperationId = 0;
     PendingLandmarkPoint pendingLandmarkPoint;
     LandmarkEditState landmarkEditState;
     BatchProcessState batchProcessState;

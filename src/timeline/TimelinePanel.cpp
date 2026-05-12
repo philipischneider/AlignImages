@@ -63,42 +63,46 @@ PairStatus ResolveStackBStatus(const AppContext& context, int stackBIndex)
     return PairStatus::Unmatched;
 }
 
-bool HasManualRegistrationForStackA(const AppContext& context, int stackAIndex)
+enum class LandmarkMarkerKind
+{
+    None,
+    Propagated,  // isManual but no landmark points (transform copied from another pair)
+    Real,        // isManual with actual landmark point pairs
+};
+
+LandmarkMarkerKind LandmarkMarkerForStackA(const AppContext& context, int stackAIndex)
 {
     if (stackAIndex < 0 || stackAIndex >= static_cast<int>(context.session.pairing.pairs.size()))
-    {
-        return false;
-    }
+        return LandmarkMarkerKind::None;
 
     const PairRecord& pair = context.session.pairing.pairs[stackAIndex];
     if (!pair.valid)
-    {
-        return false;
-    }
+        return LandmarkMarkerKind::None;
 
-    const RegistrationResult* registration =
+    const RegistrationResult* reg =
         FindRegistrationResult(context.session.registrations, pair.fixedIndex, pair.movingIndex);
-    return registration != nullptr && registration->isManual;
+    if (reg == nullptr || !reg->isManual)
+        return LandmarkMarkerKind::None;
+
+    return reg->landmarks.size() >= 2 ? LandmarkMarkerKind::Real : LandmarkMarkerKind::Propagated;
 }
 
-bool HasManualRegistrationForStackB(const AppContext& context, int stackBIndex)
+LandmarkMarkerKind LandmarkMarkerForStackB(const AppContext& context, int stackBIndex)
 {
     for (const PairRecord& pair : context.session.pairing.pairs)
     {
         if (!pair.valid || pair.movingIndex != stackBIndex)
-        {
             continue;
-        }
 
-        const RegistrationResult* registration =
+        const RegistrationResult* reg =
             FindRegistrationResult(context.session.registrations, pair.fixedIndex, pair.movingIndex);
-        if (registration != nullptr && registration->isManual)
-        {
-            return true;
-        }
+        if (reg == nullptr || !reg->isManual)
+            continue;
+
+        return reg->landmarks.size() >= 2 ? LandmarkMarkerKind::Real : LandmarkMarkerKind::Propagated;
     }
 
-    return false;
+    return LandmarkMarkerKind::None;
 }
 } // namespace
 
@@ -109,7 +113,11 @@ void TimelinePanel::Draw(AppContext& context, float height)
     ImGui::TextUnformatted("Timeline");
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
     {
-        ImGui::SetTooltip("Thumbnail timeline for both stacks. Drag the strip to adjust pairing offsets; colored markers below thumbnails indicate manual landmark alignments.");
+        ImGui::SetTooltip("Thumbnail timeline for both stacks.\n"
+                          "Drag the strip to adjust pairing offsets.\n"
+                          "Markers below thumbnails:\n"
+                          "  amber  = real landmarks placed manually\n"
+                          "  violet = transform propagated (no landmark points)");
     }
     ImGui::TextWrapped("Arraste a faixa de cada timeline para deslocar visualmente os stacks e ajustar a correspondencia.");
     ImGui::Text("Derived Offset (B -> A): %d", context.session.pairing.globalOffset);
@@ -245,6 +253,7 @@ float TimelinePanel::DrawStackTimeline(AppContext& context,
         {
             activeIndex = i;
             context.selectedHistoryIndex = -1;
+            context.selectedOperationId = 0;
             if (&stack == &context.session.stackA && i < static_cast<int>(context.session.pairing.pairs.size()))
             {
                 const PairRecord& pair = context.session.pairing.pairs[i];
@@ -264,16 +273,19 @@ float TimelinePanel::DrawStackTimeline(AppContext& context,
         }
 
         ImGui::Text("%03d", i);
-        const bool hasManualMarker = (&stack == &context.session.stackA)
-                                         ? HasManualRegistrationForStackA(context, i)
-                                         : HasManualRegistrationForStackB(context, i);
-        if (hasManualMarker)
+        const LandmarkMarkerKind markerKind = (&stack == &context.session.stackA)
+                                                  ? LandmarkMarkerForStackA(context, i)
+                                                  : LandmarkMarkerForStackB(context, i);
+        if (markerKind != LandmarkMarkerKind::None)
         {
             const ImVec2 markerMin = ImGui::GetItemRectMin();
             const ImVec2 markerMax = ImGui::GetItemRectMax();
+            const ImU32 color = (markerKind == LandmarkMarkerKind::Real)
+                                    ? IM_COL32(255, 182, 66, 255)   // amber  — real landmarks
+                                    : IM_COL32(160, 100, 220, 255); // violet — propagated transform
             drawList->AddRectFilled(ImVec2(markerMin.x + 8.0f, markerMax.y + 2.0f),
                                     ImVec2(markerMin.x + 20.0f, markerMax.y + 10.0f),
-                                    IM_COL32(255, 182, 66, 255),
+                                    color,
                                     2.0f);
         }
         ImGui::EndGroup();

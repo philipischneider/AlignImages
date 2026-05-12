@@ -33,6 +33,7 @@ struct IterationRecord
 
 struct RegistrationSnapshot
 {
+    int operationId = 0;
     std::string label;
     std::string timestamp;
     std::string transformType = "similarity";
@@ -61,10 +62,22 @@ struct RegistrationResult
     double priorTy = 0.0;
     double priorTheta = 0.0;
     double priorScale = 1.0;
+    double priorTxMean = 0.0;
+    double priorTyMean = 0.0;
+    double priorThetaMean = 0.0;
+    double priorScaleMean = 1.0;
+    double priorTxStdDev = -1.0;
+    double priorTyStdDev = -1.0;
+    double priorThetaStdDev = -1.0;
+    double priorScaleStdDev = -1.0;
     // Affine priors — set by ConvergenceAnalyzer when sx/sy data is available.
     // -1.0 means not set; fall back to priorScale for both axes.
     double priorSx = -1.0;
     double priorSy = -1.0;
+    double priorSxMean = -1.0;
+    double priorSyMean = -1.0;
+    double priorSxStdDev = -1.0;
+    double priorSyStdDev = -1.0;
     // Audit trail
     std::string timestamp;         // ISO 8601 (local time) of the last operation, e.g. "2026-04-12T14:30:00"
     std::string algorithmVersion;  // e.g. "similarity_v1", "affine_v1", "manual_landmarks"

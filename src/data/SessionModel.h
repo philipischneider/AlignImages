@@ -33,6 +33,44 @@ enum class PreviewMode
     Multiply
 };
 
+enum class OperationKind
+{
+    BatchAutoAlignment,
+    CurrentAutoAlignment,
+    ManualLandmarks,
+    PriorRefinement,
+    BatchExport,
+    ConvergenceAnalysis
+};
+
+enum class OperationScope
+{
+    Global,
+    Selection,
+    SinglePair
+};
+
+struct OperationPairRef
+{
+    int fixedIndex = -1;
+    int movingIndex = -1;
+};
+
+struct AlignmentOperation
+{
+    int id = 0;
+    std::string label;
+    std::string timestamp;
+    OperationKind kind = OperationKind::CurrentAutoAlignment;
+    OperationScope scope = OperationScope::SinglePair;
+    std::string method;
+    int affectedPairs = 0;
+    int improvedPairs = 0;
+    int worsenedPairs = 0;
+    double averageScore = 0.0;
+    std::vector<OperationPairRef> pairs;
+};
+
 struct UiPreferences
 {
     DpiMode dpiMode = DpiMode::Auto;
@@ -57,6 +95,9 @@ struct ProjectPreferences
     int activeSliceA = 0;
     int activeSliceB = 0;
     bool useAlignmentPreview = true;
+    bool useSigmaRestrictedPriorRefinement = true;
+    float sigmaMultiplier = 1.5f;
+    bool preferManualPriors = true;
 };
 
 struct SessionModel
@@ -68,6 +109,8 @@ struct SessionModel
     StackModel stackB;
     PairingModel pairing;
     std::vector<RegistrationResult> registrations;
+    std::vector<AlignmentOperation> operations;
+    int nextOperationId = 1;
     UiPreferences uiPreferences;
     ProjectPreferences projectPreferences;
 };

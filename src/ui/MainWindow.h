@@ -130,11 +130,14 @@ private:
     void AnalyzeConvergence(AppContext& context);
     void RunPriorRefinement(AppContext& context);
     void ApplyManualLandmarks(AppContext& context);
+    void PropagateManualLandmarksToAll(AppContext& context);
+    void PropagateManualLandmarksToInterval(AppContext& context, int fromPairIdx, int toPairIdx);
     void DrawLandmarkEditor(AppContext& context);
+    void DrawOperationStack(AppContext& context);
     void DrawMetricsGraph(AppContext& context);
     void DrawOperationHistory(AppContext& context);
     RegistrationResult* GetOrCreateCurrentRegistration(AppContext& context);
-    void StoreRegistrationResult(AppContext& context, const RegistrationResult& computed);
+    void StoreRegistrationResult(AppContext& context, const RegistrationResult& computed, int operationId = 0);
     BatchSummary BuildBatchSummary(const AppContext& context) const;
     bool HasBackgroundTask() const;
 

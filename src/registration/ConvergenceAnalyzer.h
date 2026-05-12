@@ -9,7 +9,6 @@ namespace align
 class ConvergenceAnalyzer
 {
 public:
-    void Analyze(std::vector<RegistrationResult>& registrations) const;
+    void Analyze(std::vector<RegistrationResult>& registrations, bool preferManualPriors = true) const;
 };
 } // namespace align
-

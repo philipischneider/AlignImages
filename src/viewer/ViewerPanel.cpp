@@ -49,6 +49,26 @@ const RegistrationResult* ResolvePreviewRegistration(const AppContext& context,
         return nullptr;
     }
 
+    if (context.selectedOperationId != 0)
+    {
+        for (const RegistrationSnapshot& snapshot : currentRegistration->history)
+        {
+            if (snapshot.operationId != context.selectedOperationId)
+            {
+                continue;
+            }
+
+            historySelection = *currentRegistration;
+            historySelection.forward = snapshot.forward;
+            historySelection.inverse = snapshot.inverse;
+            historySelection.transformType = snapshot.transformType;
+            historySelection.score = snapshot.score;
+            historySelection.manualRmsError = snapshot.manualRmsError;
+            historySelection.isManual = snapshot.isManual;
+            return &historySelection;
+        }
+    }
+
     const int selectedHistoryIndex = context.selectedHistoryIndex;
     if (selectedHistoryIndex < 0 ||
         selectedHistoryIndex >= static_cast<int>(currentRegistration->history.size()))

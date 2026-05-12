@@ -10,10 +10,12 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <ctime>
 #include <filesystem>
 #include <future>
 #include <mutex>
 #include <numeric>
+#include <sstream>
 #include <string>
 
 namespace align
@@ -234,6 +236,57 @@ std::string BuildSnapshotLabel(const RegistrationResult& registration)
     return registration.transformType.empty() ? "operation" : registration.transformType;
 }
 
+std::string BuildTimestampNow()
+{
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t t = std::chrono::system_clock::to_time_t(now);
+    std::tm tm {};
+    localtime_s(&tm, &t);
+    char buf[20];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm);
+    return buf;
+}
+
+const char* OperationKindLabel(OperationKind kind)
+{
+    switch (kind)
+    {
+    case OperationKind::BatchAutoAlignment:   return "Batch Auto";
+    case OperationKind::CurrentAutoAlignment: return "Current Auto";
+    case OperationKind::ManualLandmarks:      return "Manual Landmarks";
+    case OperationKind::PriorRefinement:      return "Prior Refinement";
+    case OperationKind::BatchExport:          return "Batch Export";
+    case OperationKind::ConvergenceAnalysis:  return "Convergence";
+    default:                                  return "Operation";
+    }
+}
+
+int AppendOperation(SessionModel& session,
+                    OperationKind kind,
+                    OperationScope scope,
+                    std::string label,
+                    std::string method,
+                    const std::vector<OperationPairRef>& pairs,
+                    double averageScore = 0.0,
+                    int improvedPairs = 0,
+                    int worsenedPairs = 0)
+{
+    AlignmentOperation operation;
+    operation.id = session.nextOperationId++;
+    operation.kind = kind;
+    operation.scope = scope;
+    operation.label = std::move(label);
+    operation.timestamp = BuildTimestampNow();
+    operation.method = std::move(method);
+    operation.pairs = pairs;
+    operation.affectedPairs = static_cast<int>(pairs.size());
+    operation.averageScore = averageScore;
+    operation.improvedPairs = improvedPairs;
+    operation.worsenedPairs = worsenedPairs;
+    session.operations.push_back(std::move(operation));
+    return session.operations.back().id;
+}
+
 const PairRecord* GetSelectedPair(const AppContext& context)
 {
     const int activeSliceA = context.session.projectPreferences.activeSliceA;
@@ -255,6 +308,37 @@ const RegistrationResult* FindSelectedRegistration(const AppContext& context)
     }
 
     return FindRegistrationResult(context.session.registrations, pair->fixedIndex, pair->movingIndex);
+}
+
+bool HasUsableRegistration(const RegistrationResult& registration)
+{
+    return registration.converged || registration.isManual || !registration.iterations.empty();
+}
+
+int EnsureRegistrationsForValidPairs(const std::vector<PairRecord>& pairs,
+                                     std::vector<RegistrationResult>& registrations)
+{
+    int created = 0;
+    for (const PairRecord& pair : pairs)
+    {
+        if (!pair.valid)
+        {
+            continue;
+        }
+
+        if (FindRegistrationResult(registrations, pair.fixedIndex, pair.movingIndex) != nullptr)
+        {
+            continue;
+        }
+
+        RegistrationResult createdRegistration;
+        createdRegistration.fixedIndex = pair.fixedIndex;
+        createdRegistration.movingIndex = pair.movingIndex;
+        registrations.push_back(createdRegistration);
+        ++created;
+    }
+
+    return created;
 }
 } // namespace
 
@@ -445,6 +529,12 @@ void MainWindow::DrawLeftPanel(AppContext& context, GLFWwindow* window)
     ImGui::SliderInt("Coarse Levels", &context.session.projectPreferences.coarseLevels, 1, 6);
     ImGui::Checkbox("Use Alignment In Preview", &context.session.projectPreferences.useAlignmentPreview);
     ShowHoveredHelp("When enabled, the preview viewer composites the moving image after applying the current alignment or selected history snapshot.");
+    ImGui::Checkbox("Sigma-Restricted Prior", &context.session.projectPreferences.useSigmaRestrictedPriorRefinement);
+    ShowHoveredHelp("Restricts prior-guided refinement to a local envelope defined by prior +/- sigma multiplier times local standard deviation.");
+    ImGui::SliderFloat("Sigma Multiplier", &context.session.projectPreferences.sigmaMultiplier, 0.5f, 3.0f, "%.2f");
+    ShowHoveredHelp("Controls how tightly the search is constrained around local prior statistics.");
+    ImGui::Checkbox("Prefer Manual Priors", &context.session.projectPreferences.preferManualPriors);
+    ShowHoveredHelp("When manual landmark-aligned slices exist nearby, use them preferentially to compute local priors.");
     TextWithHelp("Registration Actions", "Run a single alignment, process the full stack, export results, or enter manual landmark editing.");
     if (!m_currentAlignmentTask.has_value() && ImGui::Button("Run Current Alignment"))
     {
@@ -681,6 +771,17 @@ void MainWindow::DrawRightPanel(AppContext& context)
         ImGui::Text("Convergence Prior: %s", registration->hasConvergencePrior ? "yes" : "no");
         ImGui::Text("Convergence Outlier: %s", registration->convergenceOutlier ? "yes" : "no");
         ImGui::Text("Refined With Prior: %s", registration->refinedWithPrior ? "yes" : "no");
+        if (registration->hasConvergencePrior)
+        {
+            ImGui::Text("Prior sigma tx/ty: %.2f / %.2f",
+                        registration->priorTxStdDev,
+                        registration->priorTyStdDev);
+            ShowHoveredHelp("Local standard deviation used to constrain prior-guided translation search.");
+            ImGui::Text("Prior sigma theta/scale: %.4f / %.4f",
+                        registration->priorThetaStdDev,
+                        registration->priorScaleStdDev);
+            ShowHoveredHelp("Local standard deviation used to constrain prior-guided rotation and scale search.");
+        }
         if (registration->isManual)
         {
             ImGui::Text("RMS Error: %.4f px", registration->manualRmsError);
@@ -701,6 +802,9 @@ void MainWindow::DrawRightPanel(AppContext& context)
             }
         }
     }
+
+    ImGui::Separator();
+    DrawOperationStack(context);
 
     ImGui::Separator();
     DrawOperationHistory(context);
@@ -769,6 +873,35 @@ void MainWindow::ProcessBatchStep(AppContext& context)
     }
 
     context.session.pairing.pairs = std::move(result.pairs);
+    std::vector<OperationPairRef> operationPairs;
+    double totalScore = 0.0;
+    int scoreCount = 0;
+    for (RegistrationResult& registration : result.registrations)
+    {
+        if (!HasUsableRegistration(registration))
+        {
+            continue;
+        }
+        AppendHistorySnapshot(registration, BuildSnapshotLabel(registration));
+        operationPairs.push_back({registration.fixedIndex, registration.movingIndex});
+        totalScore += registration.score;
+        ++scoreCount;
+    }
+    const int operationId = AppendOperation(
+        context.session,
+        OperationKind::BatchAutoAlignment,
+        OperationScope::Global,
+        "Batch alignment",
+        context.session.projectPreferences.autoAlignmentMethod,
+        operationPairs,
+        scoreCount > 0 ? totalScore / static_cast<double>(scoreCount) : 0.0);
+    for (RegistrationResult& registration : result.registrations)
+    {
+        if (!registration.history.empty())
+        {
+            registration.history.back().operationId = operationId;
+        }
+    }
     context.session.registrations = std::move(result.registrations);
     if (result.cancelled)
     {
@@ -874,6 +1007,8 @@ void MainWindow::RunCurrentAlignment(AppContext& context)
     const SliceRecord& movingSlice = context.session.stackB.slices[pair.movingIndex];
     const bool useAffine = context.session.projectPreferences.transformType == "affine";
     const std::string autoMethod = context.session.projectPreferences.autoAlignmentMethod;
+    const bool useSigmaBounds = context.session.projectPreferences.useSigmaRestrictedPriorRefinement;
+    const double sigmaMultiplier = context.session.projectPreferences.sigmaMultiplier;
     const int pairListIndex = context.session.projectPreferences.activeSliceA;
     const std::optional<RegistrationResult> existingCopy = [&, pair]()
         -> std::optional<RegistrationResult>
@@ -890,7 +1025,7 @@ void MainWindow::RunCurrentAlignment(AppContext& context)
     m_backgroundStatus = "Running current alignment...";
     m_currentAlignmentTask = std::async(
         std::launch::async,
-        [fixedSlice, movingSlice, pair, pairListIndex, autoMethod, useAffine, existingCopy]()
+        [fixedSlice, movingSlice, pair, pairListIndex, autoMethod, useAffine, useSigmaBounds, sigmaMultiplier, existingCopy]()
         {
             CurrentAlignmentTaskResult taskResult;
             taskResult.pairListIndex = pairListIndex;
@@ -942,7 +1077,12 @@ void MainWindow::RunCurrentAlignment(AppContext& context)
                 taskResult.result = registrationEngine.RefineCtToPhotoFromPrior(
                     movingImage, fixedImage,
                     existingCopy->priorTx, existingCopy->priorTy, existingCopy->priorTheta, existingCopy->priorScale,
-                    taskResult.registration, useAffine, existingCopy->priorSx, existingCopy->priorSy);
+                    taskResult.registration, useAffine, existingCopy->priorSx, existingCopy->priorSy,
+                    useSigmaBounds,
+                    sigmaMultiplier,
+                    existingCopy->priorTxStdDev, existingCopy->priorTyStdDev,
+                    existingCopy->priorThetaStdDev, existingCopy->priorScaleStdDev,
+                    existingCopy->priorSxStdDev, existingCopy->priorSyStdDev);
             }
             else
             {
@@ -981,10 +1121,17 @@ void MainWindow::RunBatchAlignment(AppContext& context)
     auto progress = std::make_shared<BatchTaskProgress>();
     std::vector<PairRecord> pairs = context.session.pairing.pairs;
     std::vector<RegistrationResult> registrations = context.session.registrations;
+    const std::string autoMethod = context.session.projectPreferences.autoAlignmentMethod;
+    EnsureRegistrationsForValidPairs(pairs, registrations);
+    if (autoMethod == "prior_refinement_only")
+    {
+        m_convergenceAnalyzer.Analyze(registrations, context.session.projectPreferences.preferManualPriors);
+    }
     const std::vector<SliceRecord> fixedSlices = context.session.stackA.slices;
     const std::vector<SliceRecord> movingSlices = context.session.stackB.slices;
-    const std::string autoMethod = context.session.projectPreferences.autoAlignmentMethod;
     const bool useAffine = context.session.projectPreferences.transformType == "affine";
+    const bool useSigmaBounds = context.session.projectPreferences.useSigmaRestrictedPriorRefinement;
+    const double sigmaMultiplier = context.session.projectPreferences.sigmaMultiplier;
     int totalValidPairs = 0;
     for (const PairRecord& pair : pairs)
     {
@@ -1000,7 +1147,8 @@ void MainWindow::RunBatchAlignment(AppContext& context)
     m_batchTaskProgress = progress;
     context.session.workflowPhase = WorkflowPhase::InitialAlignment;
     m_batchTask = std::async(std::launch::async,
-                             [pairs, registrations, fixedSlices, movingSlices, autoMethod, useAffine, progress]()
+                             [pairs, registrations, fixedSlices, movingSlices, autoMethod, useAffine,
+                              useSigmaBounds, sigmaMultiplier, progress]()
                              {
                                  BatchTaskResult taskResult;
                                  taskResult.pairs = pairs;
@@ -1077,7 +1225,12 @@ void MainWindow::RunBatchAlignment(AppContext& context)
                                              existing->priorTx, existing->priorTy,
                                              existing->priorTheta, existing->priorScale,
                                              computed, useAffine,
-                                             existing->priorSx, existing->priorSy);
+                                             existing->priorSx, existing->priorSy,
+                                             useSigmaBounds,
+                                             sigmaMultiplier,
+                                             existing->priorTxStdDev, existing->priorTyStdDev,
+                                             existing->priorThetaStdDev, existing->priorScaleStdDev,
+                                             existing->priorSxStdDev, existing->priorSyStdDev);
                                      }
                                      else if (autoMethod == "landmarks_only")
                                      {
@@ -1348,10 +1501,17 @@ void MainWindow::CancelExportBatch()
     }
 }
 
-void MainWindow::StoreRegistrationResult(AppContext& context, const RegistrationResult& computed)
+void MainWindow::StoreRegistrationResult(AppContext& context, const RegistrationResult& computed, int operationId)
 {
     RegistrationResult stored = computed;
-    AppendHistorySnapshot(stored, BuildSnapshotLabel(stored));
+    if (operationId != 0)
+    {
+        AppendHistorySnapshot(stored, BuildSnapshotLabel(stored));
+        if (!stored.history.empty())
+        {
+            stored.history.back().operationId = operationId;
+        }
+    }
 
     RegistrationResult* existing =
         FindRegistrationResult(context.session.registrations, computed.fixedIndex, computed.movingIndex);
@@ -1481,10 +1641,78 @@ void MainWindow::DrawLandmarkEditor(AppContext& context)
         }
         ImGui::PopID();
     }
+
+    ImGui::Separator();
+    const bool enoughLandmarks = static_cast<int>(registration->landmarks.size()) >= 2;
+    if (!enoughLandmarks)
+    {
+        ImGui::BeginDisabled();
+    }
+    if (ImGui::Button("Apply Landmarks"))
+    {
+        ApplyManualLandmarks(context);
+        registration = GetOrCreateCurrentRegistration(context);
+        if (registration == nullptr)
+            return;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Apply to All Pairs"))
+    {
+        PropagateManualLandmarksToAll(context);
+        registration = GetOrCreateCurrentRegistration(context);
+        if (registration == nullptr)
+            return;
+    }
+
+    ImGui::Spacing();
+    ImGui::TextUnformatted("Apply to Interval");
+
+    const int totalPairs = static_cast<int>(context.session.pairing.pairs.size());
+    static int s_intervalFrom = 1;
+    static int s_intervalTo   = 1;
+    // Keep defaults in sync when the pair count changes.
+    if (s_intervalTo < 1 || s_intervalTo > totalPairs)
+        s_intervalTo = totalPairs;
+    if (s_intervalFrom < 1)
+        s_intervalFrom = 1;
+    if (s_intervalFrom > s_intervalTo)
+        s_intervalFrom = s_intervalTo;
+
+    ImGui::SetNextItemWidth(120.0f);
+    ImGui::InputInt("From##interval", &s_intervalFrom);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(120.0f);
+    ImGui::InputInt("To##interval", &s_intervalTo);
+    s_intervalFrom = std::clamp(s_intervalFrom, 1, std::max(1, totalPairs));
+    s_intervalTo   = std::clamp(s_intervalTo,   s_intervalFrom, std::max(1, totalPairs));
+
+    ImGui::SameLine();
+    if (ImGui::Button("Apply to Interval"))
+    {
+        PropagateManualLandmarksToInterval(context, s_intervalFrom - 1, s_intervalTo - 1);
+        registration = GetOrCreateCurrentRegistration(context);
+        if (registration == nullptr)
+            return;
+    }
+
+    if (!enoughLandmarks)
+    {
+        ImGui::EndDisabled();
+    }
+    if (registration->isManual && registration->manualRmsError > 0.0)
+    {
+        ImGui::Text("RMS error: %.2f px", registration->manualRmsError);
+    }
 }
 
 void MainWindow::ApplyManualLandmarks(AppContext& context)
 {
+    if (HasBackgroundTask())
+    {
+        m_lastMessage = "Wait for the current background task to finish.";
+        return;
+    }
+
     RegistrationResult* registration = GetOrCreateCurrentRegistration(context);
     if (registration == nullptr)
     {
@@ -1499,7 +1727,15 @@ void MainWindow::ApplyManualLandmarks(AppContext& context)
         return;
     }
 
-    StoreRegistrationResult(context, *registration);
+    const int operationId = AppendOperation(
+        context.session,
+        OperationKind::ManualLandmarks,
+        OperationScope::SinglePair,
+        "Apply manual landmarks",
+        "manual_landmarks",
+        {OperationPairRef{registration->fixedIndex, registration->movingIndex}},
+        registration->score);
+    StoreRegistrationResult(context, *registration, operationId);
     registration = GetOrCreateCurrentRegistration(context);
 
     if (context.session.projectPreferences.activeSliceA >= 0 &&
@@ -1510,7 +1746,181 @@ void MainWindow::ApplyManualLandmarks(AppContext& context)
     }
 
     context.session.workflowPhase = WorkflowPhase::ManualRefinement;
-    m_lastMessage = "Manual landmark alignment applied to the current pair.";
+    EnsureRegistrationsForValidPairs(context.session.pairing.pairs, context.session.registrations);
+    m_convergenceAnalyzer.Analyze(context.session.registrations, context.session.projectPreferences.preferManualPriors);
+
+    int propagatedPairs = 0;
+    for (const RegistrationResult& current : context.session.registrations)
+    {
+        if (current.hasConvergencePrior)
+        {
+            ++propagatedPairs;
+        }
+    }
+
+    m_lastMessage = "Manual landmark alignment applied to the current pair. Convergence priors propagated to " +
+                    std::to_string(propagatedPairs) + " stack pairs.";
+}
+
+void MainWindow::PropagateManualLandmarksToAll(AppContext& context)
+{
+    if (HasBackgroundTask())
+    {
+        m_lastMessage = "Wait for the current background task to finish.";
+        return;
+    }
+
+    RegistrationResult* current = GetOrCreateCurrentRegistration(context);
+    if (current == nullptr)
+    {
+        m_lastMessage = "No valid pair selected for landmark propagation.";
+        return;
+    }
+
+    if (current->landmarks.size() < 2)
+    {
+        m_lastMessage = "At least 2 landmark pairs are required to propagate to all pairs.";
+        return;
+    }
+
+    RegistrationResult source = *current;
+    const Result computeResult = m_landmarkRegistration.ComputeFromLandmarks(source);
+    if (!computeResult.ok)
+    {
+        m_lastMessage = computeResult.message;
+        return;
+    }
+
+    EnsureRegistrationsForValidPairs(context.session.pairing.pairs, context.session.registrations);
+
+    std::vector<OperationPairRef> affectedPairs;
+    for (const PairRecord& pair : context.session.pairing.pairs)
+    {
+        if (pair.valid)
+        {
+            affectedPairs.push_back({pair.fixedIndex, pair.movingIndex});
+        }
+    }
+
+    const int operationId = AppendOperation(
+        context.session,
+        OperationKind::ManualLandmarks,
+        OperationScope::Global,
+        "Propagate manual landmarks to all pairs",
+        "manual_landmarks",
+        affectedPairs,
+        source.score);
+
+    for (const PairRecord& pair : context.session.pairing.pairs)
+    {
+        if (!pair.valid)
+        {
+            continue;
+        }
+
+        RegistrationResult target = source;
+        target.fixedIndex = pair.fixedIndex;
+        target.movingIndex = pair.movingIndex;
+        if (pair.fixedIndex != source.fixedIndex || pair.movingIndex != source.movingIndex)
+        {
+            target.landmarks.clear();
+        }
+        StoreRegistrationResult(context, target, operationId);
+    }
+
+    for (PairRecord& pair : context.session.pairing.pairs)
+    {
+        if (pair.valid)
+        {
+            pair.status = PairStatus::Manual;
+        }
+    }
+
+    context.session.workflowPhase = WorkflowPhase::ManualRefinement;
+    EnsureRegistrationsForValidPairs(context.session.pairing.pairs, context.session.registrations);
+    m_convergenceAnalyzer.Analyze(context.session.registrations, context.session.projectPreferences.preferManualPriors);
+
+    m_lastMessage = "Landmark transform propagated to " + std::to_string(static_cast<int>(affectedPairs.size())) + " pairs.";
+}
+
+void MainWindow::PropagateManualLandmarksToInterval(AppContext& context, int fromPairIdx, int toPairIdx)
+{
+    if (HasBackgroundTask())
+    {
+        m_lastMessage = "Wait for the current background task to finish.";
+        return;
+    }
+
+    RegistrationResult* current = GetOrCreateCurrentRegistration(context);
+    if (current == nullptr)
+    {
+        m_lastMessage = "No valid pair selected for landmark propagation.";
+        return;
+    }
+
+    if (current->landmarks.size() < 2)
+    {
+        m_lastMessage = "At least 2 landmark pairs are required to propagate to an interval.";
+        return;
+    }
+
+    RegistrationResult source = *current;
+    const Result computeResult = m_landmarkRegistration.ComputeFromLandmarks(source);
+    if (!computeResult.ok)
+    {
+        m_lastMessage = computeResult.message;
+        return;
+    }
+
+    EnsureRegistrationsForValidPairs(context.session.pairing.pairs, context.session.registrations);
+
+    const int pairCount = static_cast<int>(context.session.pairing.pairs.size());
+    fromPairIdx = std::clamp(fromPairIdx, 0, pairCount - 1);
+    toPairIdx   = std::clamp(toPairIdx,   fromPairIdx, pairCount - 1);
+
+    std::vector<OperationPairRef> affectedPairs;
+    for (int i = fromPairIdx; i <= toPairIdx; ++i)
+    {
+        const PairRecord& pair = context.session.pairing.pairs[i];
+        if (pair.valid)
+        {
+            affectedPairs.push_back({pair.fixedIndex, pair.movingIndex});
+        }
+    }
+
+    const int operationId = AppendOperation(
+        context.session,
+        OperationKind::ManualLandmarks,
+        OperationScope::Selection,
+        "Propagate manual landmarks to interval [" + std::to_string(fromPairIdx + 1) +
+            "-" + std::to_string(toPairIdx + 1) + "]",
+        "manual_landmarks",
+        affectedPairs,
+        source.score);
+
+    for (int i = fromPairIdx; i <= toPairIdx; ++i)
+    {
+        PairRecord& pair = context.session.pairing.pairs[i];
+        if (!pair.valid)
+            continue;
+
+        RegistrationResult target = source;
+        target.fixedIndex  = pair.fixedIndex;
+        target.movingIndex = pair.movingIndex;
+        if (pair.fixedIndex != source.fixedIndex || pair.movingIndex != source.movingIndex)
+        {
+            target.landmarks.clear();
+        }
+        StoreRegistrationResult(context, target, operationId);
+        pair.status = PairStatus::Manual;
+    }
+
+    context.session.workflowPhase = WorkflowPhase::ManualRefinement;
+    EnsureRegistrationsForValidPairs(context.session.pairing.pairs, context.session.registrations);
+    m_convergenceAnalyzer.Analyze(context.session.registrations, context.session.projectPreferences.preferManualPriors);
+
+    m_lastMessage = "Landmark transform propagated to " + std::to_string(static_cast<int>(affectedPairs.size())) +
+                    " pairs (interval " + std::to_string(fromPairIdx + 1) + "-" + std::to_string(toPairIdx + 1) + ").";
 }
 
 void MainWindow::AnalyzeConvergence(AppContext& context)
@@ -1526,14 +1936,16 @@ void MainWindow::AnalyzeConvergence(AppContext& context)
         return;
     }
 
-    const std::vector<RegistrationResult> registrations = context.session.registrations;
+    std::vector<RegistrationResult> registrations = context.session.registrations;
+    EnsureRegistrationsForValidPairs(context.session.pairing.pairs, registrations);
+    const bool preferManualPriors = context.session.projectPreferences.preferManualPriors;
     m_backgroundStatus = "Analyzing convergence across the stack...";
     m_convergenceTask = std::async(std::launch::async,
-                                   [this, registrations]()
+                                   [this, registrations, preferManualPriors]()
                                    {
                                        ConvergenceTaskResult taskResult;
                                        taskResult.registrations = registrations;
-                                       m_convergenceAnalyzer.Analyze(taskResult.registrations);
+                                       m_convergenceAnalyzer.Analyze(taskResult.registrations, preferManualPriors);
                                        for (const RegistrationResult& registration : taskResult.registrations)
                                        {
                                            if (registration.convergenceOutlier)
@@ -1561,9 +1973,13 @@ void MainWindow::RunPriorRefinement(AppContext& context)
     }
 
     const bool useAffine = context.session.projectPreferences.transformType == "affine";
+    const bool useSigmaBounds = context.session.projectPreferences.useSigmaRestrictedPriorRefinement;
+    const double sigmaMultiplier = context.session.projectPreferences.sigmaMultiplier;
+    const bool preferManualPriors = context.session.projectPreferences.preferManualPriors;
 
     // Pre-analyze on main thread so priors are current before the async copy.
-    m_convergenceAnalyzer.Analyze(context.session.registrations);
+    EnsureRegistrationsForValidPairs(context.session.pairing.pairs, context.session.registrations);
+    m_convergenceAnalyzer.Analyze(context.session.registrations, preferManualPriors);
 
     std::vector<RegistrationResult> registrations = context.session.registrations;
     const std::vector<SliceRecord>  fixedSlices   = context.session.stackA.slices;
@@ -1587,7 +2003,7 @@ void MainWindow::RunPriorRefinement(AppContext& context)
 
     m_priorRefinementTask = std::async(
         std::launch::async,
-        [registrations, fixedSlices, movingSlices, useAffine, progress]() mutable
+        [registrations, fixedSlices, movingSlices, useAffine, useSigmaBounds, sigmaMultiplier, preferManualPriors, progress]() mutable
         {
             PriorRefinementTaskResult taskResult;
             taskResult.registrations = registrations;
@@ -1635,7 +2051,11 @@ void MainWindow::RunPriorRefinement(AppContext& context)
                     movingImage, fixedImage,
                     reg.priorTx, reg.priorTy, reg.priorTheta, reg.priorScale,
                     refined, useAffine,
-                    reg.priorSx, reg.priorSy);
+                    reg.priorSx, reg.priorSy,
+                    useSigmaBounds,
+                    sigmaMultiplier,
+                    reg.priorTxStdDev, reg.priorTyStdDev, reg.priorThetaStdDev, reg.priorScaleStdDev,
+                    reg.priorSxStdDev, reg.priorSyStdDev);
 
                 progress->attempted.fetch_add(1);
 
@@ -1654,7 +2074,7 @@ void MainWindow::RunPriorRefinement(AppContext& context)
 
             if (!taskResult.cancelled)
             {
-                convergenceAnalyzer.Analyze(taskResult.registrations);
+                convergenceAnalyzer.Analyze(taskResult.registrations, preferManualPriors);
             }
 
             return taskResult;
@@ -1736,7 +2156,24 @@ void MainWindow::ProcessAsyncTasks(AppContext& context)
         }
         else
         {
-            StoreRegistrationResult(context, result.registration);
+            OperationKind operationKind = OperationKind::CurrentAutoAlignment;
+            if (context.session.projectPreferences.autoAlignmentMethod == "prior_refinement_only")
+            {
+                operationKind = OperationKind::PriorRefinement;
+            }
+            else if (result.workflowPhase == WorkflowPhase::ManualRefinement)
+            {
+                operationKind = OperationKind::ManualLandmarks;
+            }
+            const int operationId = AppendOperation(
+                context.session,
+                operationKind,
+                OperationScope::SinglePair,
+                "Current pair alignment",
+                context.session.projectPreferences.autoAlignmentMethod,
+                {OperationPairRef{result.registration.fixedIndex, result.registration.movingIndex}},
+                result.registration.score);
+            StoreRegistrationResult(context, result.registration, operationId);
             if (result.pairListIndex >= 0 &&
                 result.pairListIndex < static_cast<int>(context.session.pairing.pairs.size()))
             {
@@ -1803,6 +2240,14 @@ void MainWindow::ProcessAsyncTasks(AppContext& context)
         else
         {
             context.session.registrations = std::move(result.registrations);
+            AppendOperation(
+                context.session,
+                OperationKind::ConvergenceAnalysis,
+                OperationScope::Global,
+                "Convergence analysis",
+                context.session.projectPreferences.autoAlignmentMethod,
+                {},
+                0.0);
             m_lastMessage = "Convergence analysis complete. Outliers flagged: " +
                             std::to_string(result.outlierCount) + ".";
         }
@@ -1827,6 +2272,38 @@ void MainWindow::ProcessAsyncTasks(AppContext& context)
         }
         else
         {
+            std::vector<OperationPairRef> operationPairs;
+            double totalScore = 0.0;
+            int scoreCount = 0;
+            for (RegistrationResult& registration : result.registrations)
+            {
+                if (!registration.refinedWithPrior || registration.isManual)
+                {
+                    continue;
+                }
+                operationPairs.push_back({registration.fixedIndex, registration.movingIndex});
+                totalScore += registration.score;
+                ++scoreCount;
+            }
+            const int operationId = AppendOperation(
+                context.session,
+                OperationKind::PriorRefinement,
+                operationPairs.size() == 1 ? OperationScope::SinglePair : OperationScope::Global,
+                "Prior refinement",
+                context.session.projectPreferences.useSigmaRestrictedPriorRefinement ? "prior_sigma_restricted" : "prior_refinement",
+                operationPairs,
+                scoreCount > 0 ? totalScore / static_cast<double>(scoreCount) : 0.0);
+            for (RegistrationResult& registration : result.registrations)
+            {
+                if (registration.refinedWithPrior && !registration.isManual)
+                {
+                    AppendHistorySnapshot(registration, BuildSnapshotLabel(registration));
+                    if (!registration.history.empty())
+                    {
+                        registration.history.back().operationId = operationId;
+                    }
+                }
+            }
             context.session.registrations = std::move(result.registrations);
             m_lastMessage = "Prior refinement complete. Refined registrations: " +
                             std::to_string(result.refined) + ".";
@@ -1871,6 +2348,57 @@ bool MainWindow::HasBackgroundTask() const
 // ──────────────────────────────────────────────────────────────
 // Operation history panel
 // ──────────────────────────────────────────────────────────────
+
+void MainWindow::DrawOperationStack(AppContext& context)
+{
+    ImGui::TextUnformatted("Operation Stack");
+    ShowHoveredHelp("Chronological stack of executed operations. Select one to preview the corresponding transform for the current pair when available.");
+
+    if (context.session.operations.empty())
+    {
+        ImGui::TextDisabled("No operations recorded yet.");
+        return;
+    }
+
+    if (ImGui::Button("Show Latest State"))
+    {
+        context.selectedOperationId = 0;
+        context.selectedHistoryIndex = -1;
+    }
+
+    for (int i = static_cast<int>(context.session.operations.size()) - 1; i >= 0; --i)
+    {
+        const AlignmentOperation& operation = context.session.operations[static_cast<size_t>(i)];
+        std::ostringstream label;
+        label << OperationKindLabel(operation.kind) << " | " << operation.affectedPairs;
+        if (!operation.label.empty())
+        {
+            label << " | " << operation.label;
+        }
+
+        const bool selected = context.selectedOperationId == operation.id;
+        if (ImGui::Selectable(label.str().c_str(), selected))
+        {
+            context.selectedOperationId = operation.id;
+            context.selectedHistoryIndex = -1;
+        }
+
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::BeginTooltip();
+            ImGui::Text("Scope: %s", operation.scope == OperationScope::Global ? "Global"
+                                                                              : (operation.scope == OperationScope::Selection ? "Selection"
+                                                                                                                              : "Single Pair"));
+            ImGui::Text("Method: %s", operation.method.empty() ? "n/a" : operation.method.c_str());
+            ImGui::Text("Affected pairs: %d", operation.affectedPairs);
+            if (!operation.timestamp.empty())
+            {
+                ImGui::TextUnformatted(operation.timestamp.c_str());
+            }
+            ImGui::EndTooltip();
+        }
+    }
+}
 
 void MainWindow::DrawOperationHistory(AppContext& context)
 {

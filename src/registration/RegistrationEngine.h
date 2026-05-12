@@ -27,6 +27,14 @@ public:
                                     RegistrationResult& result,
                                     bool useAffine = false,
                                     double priorSx = -1.0,
-                                    double priorSy = -1.0) const;
+                                    double priorSy = -1.0,
+                                    bool useSigmaBounds = false,
+                                    double sigmaMultiplier = 1.5,
+                                    double priorTxStdDev = -1.0,
+                                    double priorTyStdDev = -1.0,
+                                    double priorThetaStdDev = -1.0,
+                                    double priorScaleStdDev = -1.0,
+                                    double priorSxStdDev = -1.0,
+                                    double priorSyStdDev = -1.0) const;
 };
 } // namespace align

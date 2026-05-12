@@ -97,6 +97,48 @@ PairStatus ParsePairStatus(const nlohmann::json& value)
     }
     return PairStatus::Unmatched;
 }
+
+const char* ToString(OperationKind kind)
+{
+    switch (kind)
+    {
+    case OperationKind::BatchAutoAlignment:   return "batch_auto_alignment";
+    case OperationKind::CurrentAutoAlignment: return "current_auto_alignment";
+    case OperationKind::ManualLandmarks:      return "manual_landmarks";
+    case OperationKind::PriorRefinement:      return "prior_refinement";
+    case OperationKind::BatchExport:          return "batch_export";
+    case OperationKind::ConvergenceAnalysis:  return "convergence_analysis";
+    default:                                  return "current_auto_alignment";
+    }
+}
+
+OperationKind ParseOperationKind(const std::string& value)
+{
+    if (value == "batch_auto_alignment")   return OperationKind::BatchAutoAlignment;
+    if (value == "manual_landmarks")       return OperationKind::ManualLandmarks;
+    if (value == "prior_refinement")       return OperationKind::PriorRefinement;
+    if (value == "batch_export")           return OperationKind::BatchExport;
+    if (value == "convergence_analysis")   return OperationKind::ConvergenceAnalysis;
+    return OperationKind::CurrentAutoAlignment;
+}
+
+const char* ToString(OperationScope scope)
+{
+    switch (scope)
+    {
+    case OperationScope::Global:     return "global";
+    case OperationScope::Selection:  return "selection";
+    case OperationScope::SinglePair: return "single_pair";
+    default:                         return "single_pair";
+    }
+}
+
+OperationScope ParseOperationScope(const std::string& value)
+{
+    if (value == "global")    return OperationScope::Global;
+    if (value == "selection") return OperationScope::Selection;
+    return OperationScope::SinglePair;
+}
 } // namespace
 
 Result SessionSerializer::Save(const SessionModel& session, const std::filesystem::path& filePath) const
@@ -106,6 +148,7 @@ Result SessionSerializer::Save(const SessionModel& session, const std::filesyste
         {"name", session.projectName},
         {"version", session.version},
         {"workflow_phase", ToString(session.workflowPhase)},
+        {"next_operation_id", session.nextOperationId},
         {"registration_preset", session.projectPreferences.registrationPreset},
         {"auto_alignment_method", session.projectPreferences.autoAlignmentMethod},
         {"mask_method", session.projectPreferences.maskMethod},
@@ -114,8 +157,12 @@ Result SessionSerializer::Save(const SessionModel& session, const std::filesyste
         {"transform_type", session.projectPreferences.transformType},
         {"max_iterations", session.projectPreferences.maxIterations},
         {"coarse_levels", session.projectPreferences.coarseLevels},
-        {"use_alignment_preview", session.projectPreferences.useAlignmentPreview}
+        {"use_alignment_preview", session.projectPreferences.useAlignmentPreview},
+        {"use_sigma_restricted_prior_refinement", session.projectPreferences.useSigmaRestrictedPriorRefinement},
+        {"sigma_multiplier", session.projectPreferences.sigmaMultiplier},
+        {"prefer_manual_priors", session.projectPreferences.preferManualPriors}
     };
+    root["operations"] = nlohmann::json::array();
 
     root["ui"] = {
         {"dpi_mode", ToString(session.uiPreferences.dpiMode)},
@@ -188,8 +235,20 @@ Result SessionSerializer::Save(const SessionModel& session, const std::filesyste
             {"prior_ty", registration.priorTy},
             {"prior_theta", registration.priorTheta},
             {"prior_scale", registration.priorScale},
+            {"prior_tx_mean", registration.priorTxMean},
+            {"prior_ty_mean", registration.priorTyMean},
+            {"prior_theta_mean", registration.priorThetaMean},
+            {"prior_scale_mean", registration.priorScaleMean},
+            {"prior_tx_stddev", registration.priorTxStdDev},
+            {"prior_ty_stddev", registration.priorTyStdDev},
+            {"prior_theta_stddev", registration.priorThetaStdDev},
+            {"prior_scale_stddev", registration.priorScaleStdDev},
             {"prior_sx", registration.priorSx},
             {"prior_sy", registration.priorSy},
+            {"prior_sx_mean", registration.priorSxMean},
+            {"prior_sy_mean", registration.priorSyMean},
+            {"prior_sx_stddev", registration.priorSxStdDev},
+            {"prior_sy_stddev", registration.priorSyStdDev},
             {"timestamp", registration.timestamp},
             {"algorithm_version", registration.algorithmVersion},
             {"operation_log", registration.operationLog},
@@ -202,6 +261,7 @@ Result SessionSerializer::Save(const SessionModel& session, const std::filesyste
         {
             root["registrations"].back()["history"].push_back({
                 {"label", snapshot.label},
+                {"operation_id", snapshot.operationId},
                 {"timestamp", snapshot.timestamp},
                 {"transform_type", snapshot.transformType},
                 {"forward_matrix_3x3", snapshot.forward.matrix},
@@ -238,6 +298,31 @@ Result SessionSerializer::Save(const SessionModel& session, const std::filesyste
         }
     }
 
+    for (const AlignmentOperation& operation : session.operations)
+    {
+        nlohmann::json op = {
+            {"id", operation.id},
+            {"label", operation.label},
+            {"timestamp", operation.timestamp},
+            {"kind", ToString(operation.kind)},
+            {"scope", ToString(operation.scope)},
+            {"method", operation.method},
+            {"affected_pairs", operation.affectedPairs},
+            {"improved_pairs", operation.improvedPairs},
+            {"worsened_pairs", operation.worsenedPairs},
+            {"average_score", operation.averageScore},
+            {"pairs", nlohmann::json::array()}
+        };
+        for (const OperationPairRef& pairRef : operation.pairs)
+        {
+            op["pairs"].push_back({
+                {"fixed_index", pairRef.fixedIndex},
+                {"moving_index", pairRef.movingIndex}
+            });
+        }
+        root["operations"].push_back(std::move(op));
+    }
+
     std::filesystem::create_directories(filePath.parent_path());
 
     std::ofstream output(filePath);
@@ -265,6 +350,7 @@ Result SessionSerializer::Load(const std::filesystem::path& filePath, SessionMod
     loaded.projectName = root["project"].value("name", loaded.projectName);
     loaded.version = root["project"].value("version", loaded.version);
     loaded.workflowPhase = ParseWorkflowPhase(root["project"].value("workflow_phase", "setup"));
+    loaded.nextOperationId = root["project"].value("next_operation_id", loaded.nextOperationId);
     loaded.projectPreferences.registrationPreset =
         root["project"].value("registration_preset", loaded.projectPreferences.registrationPreset);
     loaded.projectPreferences.autoAlignmentMethod =
@@ -283,6 +369,13 @@ Result SessionSerializer::Load(const std::filesystem::path& filePath, SessionMod
         root["project"].value("coarse_levels", loaded.projectPreferences.coarseLevels);
     loaded.projectPreferences.useAlignmentPreview =
         root["project"].value("use_alignment_preview", loaded.projectPreferences.useAlignmentPreview);
+    loaded.projectPreferences.useSigmaRestrictedPriorRefinement =
+        root["project"].value("use_sigma_restricted_prior_refinement",
+                              loaded.projectPreferences.useSigmaRestrictedPriorRefinement);
+    loaded.projectPreferences.sigmaMultiplier =
+        root["project"].value("sigma_multiplier", loaded.projectPreferences.sigmaMultiplier);
+    loaded.projectPreferences.preferManualPriors =
+        root["project"].value("prefer_manual_priors", loaded.projectPreferences.preferManualPriors);
 
     if (root.contains("ui"))
     {
@@ -372,8 +465,20 @@ Result SessionSerializer::Load(const std::filesystem::path& filePath, SessionMod
             registration.priorTy    = item.value("prior_ty", 0.0);
             registration.priorTheta = item.value("prior_theta", 0.0);
             registration.priorScale = item.value("prior_scale", 1.0);
+            registration.priorTxMean = item.value("prior_tx_mean", registration.priorTx);
+            registration.priorTyMean = item.value("prior_ty_mean", registration.priorTy);
+            registration.priorThetaMean = item.value("prior_theta_mean", registration.priorTheta);
+            registration.priorScaleMean = item.value("prior_scale_mean", registration.priorScale);
+            registration.priorTxStdDev = item.value("prior_tx_stddev", -1.0);
+            registration.priorTyStdDev = item.value("prior_ty_stddev", -1.0);
+            registration.priorThetaStdDev = item.value("prior_theta_stddev", -1.0);
+            registration.priorScaleStdDev = item.value("prior_scale_stddev", -1.0);
             registration.priorSx    = item.value("prior_sx", -1.0);
             registration.priorSy    = item.value("prior_sy", -1.0);
+            registration.priorSxMean = item.value("prior_sx_mean", registration.priorSx);
+            registration.priorSyMean = item.value("prior_sy_mean", registration.priorSy);
+            registration.priorSxStdDev = item.value("prior_sx_stddev", -1.0);
+            registration.priorSyStdDev = item.value("prior_sy_stddev", -1.0);
             registration.timestamp       = item.value("timestamp", "");
             registration.algorithmVersion = item.value("algorithm_version", "");
             if (item.contains("operation_log") && item["operation_log"].is_array())
@@ -387,6 +492,7 @@ Result SessionSerializer::Load(const std::filesystem::path& filePath, SessionMod
                 {
                     RegistrationSnapshot snapshot;
                     snapshot.label = historyItem.value("label", "");
+                    snapshot.operationId = historyItem.value("operation_id", 0);
                     snapshot.timestamp = historyItem.value("timestamp", "");
                     snapshot.transformType = historyItem.value("transform_type", "similarity");
                     snapshot.score = historyItem.value("score", 0.0);
@@ -462,6 +568,35 @@ Result SessionSerializer::Load(const std::filesystem::path& filePath, SessionMod
             }
 
             loaded.registrations.push_back(registration);
+        }
+    }
+
+    if (root.contains("operations") && root["operations"].is_array())
+    {
+        for (const auto& item : root["operations"])
+        {
+            AlignmentOperation operation;
+            operation.id = item.value("id", 0);
+            operation.label = item.value("label", "");
+            operation.timestamp = item.value("timestamp", "");
+            operation.kind = ParseOperationKind(item.value("kind", "current_auto_alignment"));
+            operation.scope = ParseOperationScope(item.value("scope", "single_pair"));
+            operation.method = item.value("method", "");
+            operation.affectedPairs = item.value("affected_pairs", 0);
+            operation.improvedPairs = item.value("improved_pairs", 0);
+            operation.worsenedPairs = item.value("worsened_pairs", 0);
+            operation.averageScore = item.value("average_score", 0.0);
+            if (item.contains("pairs") && item["pairs"].is_array())
+            {
+                for (const auto& pairItem : item["pairs"])
+                {
+                    OperationPairRef pairRef;
+                    pairRef.fixedIndex = pairItem.value("fixed_index", -1);
+                    pairRef.movingIndex = pairItem.value("moving_index", -1);
+                    operation.pairs.push_back(pairRef);
+                }
+            }
+            loaded.operations.push_back(std::move(operation));
         }
     }
 

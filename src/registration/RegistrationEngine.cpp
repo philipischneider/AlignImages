@@ -260,6 +260,34 @@ struct LevelData
     double  coordScale = 1.0;
 };
 
+struct SimilarityBounds
+{
+    bool enabled = false;
+    double minScale = 0.1;
+    double maxScale = 10.0;
+    double minTheta = -3.14159265358979323846;
+    double maxTheta = 3.14159265358979323846;
+    double minTx = -1.0e9;
+    double maxTx = 1.0e9;
+    double minTy = -1.0e9;
+    double maxTy = 1.0e9;
+};
+
+struct AffineBounds
+{
+    bool enabled = false;
+    double minSx = 0.1;
+    double maxSx = 10.0;
+    double minSy = 0.1;
+    double maxSy = 10.0;
+    double minTheta = -3.14159265358979323846;
+    double maxTheta = 3.14159265358979323846;
+    double minTx = -1.0e9;
+    double maxTx = 1.0e9;
+    double minTy = -1.0e9;
+    double maxTy = 1.0e9;
+};
+
 cv::Mat ComputeGradientNorm(const cv::Mat& colorImage)
 {
     cv::Mat gray;
@@ -389,7 +417,8 @@ void RefineParameters(const std::array<LevelData, 3>& levels,
                       double& tx,
                       double& ty,
                       std::vector<IterationRecord>& iterations,
-                      double& bestScore)
+                      double& bestScore,
+                      const SimilarityBounds* bounds = nullptr)
 {
     struct StepConfig
     {
@@ -441,13 +470,21 @@ void RefineParameters(const std::array<LevelData, 3>& levels,
                                 tyOffset    == 0 && txOffset    == 0)
                                 continue;
 
-                            candidates.push_back({
+                            Candidate candidate {
                                 (std::max)(0.1, scale + step.scaleStep * static_cast<double>(scaleOffset)),
                                 NormalizeAngle(theta  + step.thetaStep * static_cast<double>(thetaOffset)),
                                 tx + step.txStep * static_cast<double>(txOffset),
                                 ty + step.tyStep * static_cast<double>(tyOffset),
                                 -1.0
-                            });
+                            };
+                            if (bounds != nullptr && bounds->enabled)
+                            {
+                                candidate.scale = std::clamp(candidate.scale, bounds->minScale, bounds->maxScale);
+                                candidate.theta = std::clamp(candidate.theta, bounds->minTheta, bounds->maxTheta);
+                                candidate.tx = std::clamp(candidate.tx, bounds->minTx, bounds->maxTx);
+                                candidate.ty = std::clamp(candidate.ty, bounds->minTy, bounds->maxTy);
+                            }
+                            candidates.push_back(candidate);
                         }
                     }
                 }
@@ -496,7 +533,8 @@ void RefineParametersAffine(const std::array<LevelData, 3>& levels,
                              double& tx,
                              double& ty,
                              std::vector<IterationRecord>& iterations,
-                             double& bestScore)
+                             double& bestScore,
+                             const AffineBounds* bounds = nullptr)
 {
     struct StepConfig
     {
@@ -547,14 +585,23 @@ void RefineParametersAffine(const std::array<LevelData, 3>& levels,
                     tyOffset  == 0 && txOffset  == 0)
                     continue;
 
-                candidates.push_back({
+                Candidate candidate {
                     (std::max)(0.1, sx + step.scaleStep * static_cast<double>(sxOffset)),
                     (std::max)(0.1, sy + step.scaleStep * static_cast<double>(syOffset)),
                     NormalizeAngle(theta + step.thetaStep * static_cast<double>(thetaOffset)),
                     tx + step.txStep * static_cast<double>(txOffset),
                     ty + step.tyStep * static_cast<double>(tyOffset),
                     -1.0
-                });
+                };
+                if (bounds != nullptr && bounds->enabled)
+                {
+                    candidate.sx = std::clamp(candidate.sx, bounds->minSx, bounds->maxSx);
+                    candidate.sy = std::clamp(candidate.sy, bounds->minSy, bounds->maxSy);
+                    candidate.theta = std::clamp(candidate.theta, bounds->minTheta, bounds->maxTheta);
+                    candidate.tx = std::clamp(candidate.tx, bounds->minTx, bounds->maxTx);
+                    candidate.ty = std::clamp(candidate.ty, bounds->minTy, bounds->maxTy);
+                }
+                candidates.push_back(candidate);
             }
 
             std::for_each(std::execution::par_unseq, candidates.begin(), candidates.end(),
@@ -697,7 +744,15 @@ Result RegistrationEngine::RefineCtToPhotoFromPrior(const cv::Mat& movingImage,
                                                     RegistrationResult& result,
                                                     bool useAffine,
                                                     double priorSx,
-                                                    double priorSy) const
+                                                    double priorSy,
+                                                    bool useSigmaBounds,
+                                                    double sigmaMultiplier,
+                                                    double priorTxStdDev,
+                                                    double priorTyStdDev,
+                                                    double priorThetaStdDev,
+                                                    double priorScaleStdDev,
+                                                    double priorSxStdDev,
+                                                    double priorSyStdDev) const
 {
     if (movingImage.empty() || fixedImage.empty())
         return Result{false, "Images must be loaded before refinement."};
@@ -709,6 +764,38 @@ Result RegistrationEngine::RefineCtToPhotoFromPrior(const cv::Mat& movingImage,
 
     double bestScore = 0.0;
     const std::string ts = GetTimestamp();
+    SimilarityBounds similarityBounds;
+    AffineBounds affineBounds;
+    if (useSigmaBounds)
+    {
+        similarityBounds.enabled = priorTxStdDev > 0.0 || priorTyStdDev > 0.0 ||
+                                   priorThetaStdDev > 0.0 || priorScaleStdDev > 0.0;
+        similarityBounds.minTx = priorTx - (priorTxStdDev > 0.0 ? sigmaMultiplier * priorTxStdDev : 0.0);
+        similarityBounds.maxTx = priorTx + (priorTxStdDev > 0.0 ? sigmaMultiplier * priorTxStdDev : 0.0);
+        similarityBounds.minTy = priorTy - (priorTyStdDev > 0.0 ? sigmaMultiplier * priorTyStdDev : 0.0);
+        similarityBounds.maxTy = priorTy + (priorTyStdDev > 0.0 ? sigmaMultiplier * priorTyStdDev : 0.0);
+        similarityBounds.minTheta = priorTheta - (priorThetaStdDev > 0.0 ? sigmaMultiplier * priorThetaStdDev : 0.0);
+        similarityBounds.maxTheta = priorTheta + (priorThetaStdDev > 0.0 ? sigmaMultiplier * priorThetaStdDev : 0.0);
+        similarityBounds.minScale = (std::max)(0.1, priorScale - (priorScaleStdDev > 0.0 ? sigmaMultiplier * priorScaleStdDev : 0.0));
+        similarityBounds.maxScale = (std::max)(similarityBounds.minScale, priorScale +
+            (priorScaleStdDev > 0.0 ? sigmaMultiplier * priorScaleStdDev : 0.0));
+
+        affineBounds.enabled = similarityBounds.enabled || priorSxStdDev > 0.0 || priorSyStdDev > 0.0;
+        affineBounds.minTx = similarityBounds.minTx;
+        affineBounds.maxTx = similarityBounds.maxTx;
+        affineBounds.minTy = similarityBounds.minTy;
+        affineBounds.maxTy = similarityBounds.maxTy;
+        affineBounds.minTheta = similarityBounds.minTheta;
+        affineBounds.maxTheta = similarityBounds.maxTheta;
+        const double baseSx = priorSx > 0.0 ? priorSx : priorScale;
+        const double baseSy = priorSy > 0.0 ? priorSy : priorScale;
+        affineBounds.minSx = (std::max)(0.1, baseSx - (priorSxStdDev > 0.0 ? sigmaMultiplier * priorSxStdDev : 0.0));
+        affineBounds.maxSx = (std::max)(affineBounds.minSx, baseSx +
+            (priorSxStdDev > 0.0 ? sigmaMultiplier * priorSxStdDev : 0.0));
+        affineBounds.minSy = (std::max)(0.1, baseSy - (priorSyStdDev > 0.0 ? sigmaMultiplier * priorSyStdDev : 0.0));
+        affineBounds.maxSy = (std::max)(affineBounds.minSy, baseSy +
+            (priorSyStdDev > 0.0 ? sigmaMultiplier * priorSyStdDev : 0.0));
+    }
 
     if (useAffine)
     {
@@ -725,7 +812,7 @@ Result RegistrationEngine::RefineCtToPhotoFromPrior(const cv::Mat& movingImage,
         init.theta = theta; init.scale = (sx + sy) * 0.5; init.sx = sx; init.sy = sy;
         result.iterations.push_back(init);
 
-        RefineParametersAffine(levels, sx, sy, theta, tx, ty, result.iterations, bestScore);
+        RefineParametersAffine(levels, sx, sy, theta, tx, ty, result.iterations, bestScore, &affineBounds);
 
         result.forward = BuildAffineTransform(sx, sy, theta, tx, ty);
         result.inverse = InvertAffineTransform(sx, sy, theta, tx, ty);
@@ -739,7 +826,7 @@ Result RegistrationEngine::RefineCtToPhotoFromPrior(const cv::Mat& movingImage,
         bestScore = ComputeCombinedScore(levels[2], result.forward);
         result.iterations.push_back({0, bestScore, tx, ty, theta, scale, false});
 
-        RefineParameters(levels, scale, theta, tx, ty, result.iterations, bestScore);
+        RefineParameters(levels, scale, theta, tx, ty, result.iterations, bestScore, &similarityBounds);
 
         result.forward = BuildSimilarityTransform(scale, theta, tx, ty);
         result.inverse = InvertSimilarityTransform(scale, theta, tx, ty);
