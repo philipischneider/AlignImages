@@ -149,6 +149,7 @@ Result LandmarkRegistration::ComputeFromLandmarks(RegistrationResult& registrati
     registration.score = 1.0 / (1.0 + registration.manualRmsError);
     registration.converged = true;
     registration.isManual = true;
+    registration.isInterpolated = false;
     registration.iterations.clear();
 
     const double tx = affine.at<double>(0, 2);

@@ -2434,11 +2434,31 @@ bool MainWindow::HasBackgroundTask() const
 
 void MainWindow::RunTransformInterpolation(AppContext& context)
 {
+    // Count anchors before attempting, for a precise error message.
+    int anchorCount = 0;
+    for (const PairRecord& pair : context.session.pairing.pairs)
+    {
+        if (!pair.valid) continue;
+        const RegistrationResult* reg =
+            FindRegistrationResult(context.session.registrations, pair.fixedIndex, pair.movingIndex);
+        if (reg == nullptr) continue;
+        if (reg->isManual && !reg->landmarks.empty() && !reg->isInterpolated)
+            ++anchorCount;
+    }
+
+    if (anchorCount < 2)
+    {
+        m_lastMessage = "Interpolation: only " + std::to_string(anchorCount) +
+                        " anchor(s) found. Need at least 2 pairs with a converged or manual registration.";
+        return;
+    }
+
     const int count = ApplyTransformInterpolation(context.session.pairing.pairs,
                                                   context.session.registrations);
     if (count == 0)
     {
-        m_lastMessage = "Interpolation: no gaps found between anchor registrations (need at least 2 converged or manual results).";
+        m_lastMessage = "Interpolation: " + std::to_string(anchorCount) +
+                        " anchors found but all intermediate slices already have real registrations (nothing to fill).";
         return;
     }
 

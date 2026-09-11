@@ -10,9 +10,12 @@ namespace align
 namespace
 {
 
+// An anchor is a slice where the user placed explicit landmarks.
+// Propagated results (isManual = true but landmarks cleared) and auto-registrations
+// are NOT anchors — they will be overwritten by interpolation.
 bool IsAnchorRegistration(const RegistrationResult& reg)
 {
-    return (reg.converged || reg.isManual) && !reg.isInterpolated;
+    return reg.isManual && !reg.landmarks.empty() && !reg.isInterpolated;
 }
 
 void ExtractSimilarityParams(const RegistrationResult& reg,
@@ -126,8 +129,8 @@ int ApplyTransformInterpolation(const std::vector<PairRecord>& pairs,
             RegistrationResult* existing =
                 FindRegistrationResult(registrations, pair.fixedIndex, pair.movingIndex);
 
-            // Keep real anchors — only fill gaps without a result or with a previous interpolation.
-            if (existing != nullptr && IsAnchorRegistration(*existing))
+            // Protect only slices with explicit user-placed landmarks.
+            if (existing != nullptr && existing->isManual && !existing->landmarks.empty() && !existing->isInterpolated)
                 continue;
 
             const double t     = static_cast<double>(i - startA.pairIndex) / static_cast<double>(gap);
