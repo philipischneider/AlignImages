@@ -4,6 +4,9 @@
 #include "io/ImageLoader.h"
 #include "viewer/ImageTexture.h"
 
+#include <opencv2/core.hpp>
+
+#include <future>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -29,10 +32,11 @@ private:
                             int& activeIndex,
                             int& timelineOffset,
                             int normalizedOffset);
-    ImageTexture* GetOrCreateThumbnail(const SliceRecord& slice);
+    ImageTexture* GetOrCreateThumbnail(const StackModel& stack, const SliceRecord& slice);
 
     ImageLoader m_imageLoader;
     std::unordered_map<std::string, ThumbnailEntry> m_thumbnailCache;
+    std::unordered_map<std::string, std::future<cv::Mat>> m_pendingThumbnails;
     std::string m_draggingTimelineId;
     float m_dragStartMouseX = 0.0f;
     int m_dragStartOffset = 0;

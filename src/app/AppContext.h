@@ -1,6 +1,7 @@
 #pragma once
 
 #include "data/SessionModel.h"
+#include "io/DicomPixelCache.h"
 
 namespace align
 {
@@ -49,5 +50,6 @@ struct AppContext
     PendingLandmarkPoint pendingLandmarkPoint;
     LandmarkEditState landmarkEditState;
     BatchProcessState batchProcessState;
+    DicomPixelCache dicomPixelCache;
 };
 } // namespace align

@@ -125,7 +125,8 @@ Result LandmarkRegistration::ComputeFromLandmarks(RegistrationResult& registrati
 
     for (const LandmarkPair& landmark : registration.landmarks)
     {
-        if (!std::isfinite(landmark.fixedX) || !std::isfinite(landmark.fixedY))
+        if (!std::isfinite(landmark.fixedX) || !std::isfinite(landmark.fixedY) ||
+            !std::isfinite(landmark.movingX) || !std::isfinite(landmark.movingY))
             continue;
         movingPoints.emplace_back(static_cast<float>(landmark.movingX), static_cast<float>(landmark.movingY));
         fixedPoints.emplace_back(static_cast<float>(landmark.fixedX), static_cast<float>(landmark.fixedY));

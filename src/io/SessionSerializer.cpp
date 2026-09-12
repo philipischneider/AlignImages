@@ -181,6 +181,13 @@ Result SessionSerializer::Save(const SessionModel& session, const std::filesyste
         result["name"] = stack.name;
         result["modality"] = stack.modality;
         result["directory"] = stack.directory;
+        result["is_dicom"] = stack.isDicom;
+        result["window_center"] = stack.windowCenter;
+        result["window_width"] = stack.windowWidth;
+        result["default_window_center"] = stack.defaultWindowCenter;
+        result["default_window_width"] = stack.defaultWindowWidth;
+        result["rescale_slope"] = stack.rescaleSlope;
+        result["rescale_intercept"] = stack.rescaleIntercept;
         result["slices"] = nlohmann::json::array();
         for (const SliceRecord& slice : stack.slices)
         {
@@ -189,7 +196,12 @@ Result SessionSerializer::Save(const SessionModel& session, const std::filesyste
                 {"file_path", slice.filePath},
                 {"file_name", slice.fileName},
                 {"width", slice.width},
-                {"height", slice.height}
+                {"height", slice.height},
+                {"instance_number", slice.instanceNumber},
+                {"slice_location", slice.sliceLocation},
+                {"flip_horizontal", slice.flipHorizontal},
+                {"flip_vertical", slice.flipVertical},
+                {"rotation_degrees", slice.rotationDegrees}
             });
         }
         return result;
@@ -397,6 +409,13 @@ Result SessionSerializer::Load(const std::filesystem::path& filePath, SessionMod
             stack.name = node.value("name", stack.name);
             stack.modality = node.value("modality", stack.modality);
             stack.directory = node.value("directory", stack.directory);
+            stack.isDicom = node.value("is_dicom", stack.isDicom);
+            stack.windowCenter = node.value("window_center", stack.windowCenter);
+            stack.windowWidth = node.value("window_width", stack.windowWidth);
+            stack.defaultWindowCenter = node.value("default_window_center", stack.defaultWindowCenter);
+            stack.defaultWindowWidth = node.value("default_window_width", stack.defaultWindowWidth);
+            stack.rescaleSlope = node.value("rescale_slope", stack.rescaleSlope);
+            stack.rescaleIntercept = node.value("rescale_intercept", stack.rescaleIntercept);
             stack.slices.clear();
             if (node.contains("slices"))
             {
@@ -408,6 +427,11 @@ Result SessionSerializer::Load(const std::filesystem::path& filePath, SessionMod
                     slice.fileName = item.value("file_name", "");
                     slice.width = item.value("width", 0);
                     slice.height = item.value("height", 0);
+                    slice.instanceNumber = item.value("instance_number", -1);
+                    slice.sliceLocation = item.value("slice_location", 0.0);
+                    slice.flipHorizontal = item.value("flip_horizontal", false);
+                    slice.flipVertical = item.value("flip_vertical", false);
+                    slice.rotationDegrees = item.value("rotation_degrees", 0);
                     stack.slices.push_back(slice);
                 }
             }

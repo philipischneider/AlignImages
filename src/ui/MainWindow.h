@@ -144,6 +144,9 @@ private:
     void RunTransformInterpolation(AppContext& context);
     void ExportAnimatedPreview(AppContext& context);
     void CancelAnimatedExport();
+    void DrawImageOrientationSection(AppContext& context);
+    void DrawStackOrientationControls(const char* idLabel, const char* stackLabel, StackModel& stack, int activeIndex,
+                                      int& rangeStart, int& rangeEnd);
     void DrawLandmarkEditor(AppContext& context);
     void DrawOperationStack(AppContext& context);
     void DrawMetricsGraph(AppContext& context);
@@ -180,5 +183,10 @@ private:
 
     std::string m_backgroundStatus;
     std::string m_lastMessage;
+
+    int m_orientationRangeStartA = 0;
+    int m_orientationRangeEndA = 0;
+    int m_orientationRangeStartB = 0;
+    int m_orientationRangeEndB = 0;
 };
 } // namespace align

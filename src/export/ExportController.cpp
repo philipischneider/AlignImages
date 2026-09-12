@@ -14,12 +14,14 @@ cv::Mat BuildAffine(const Transform2D& transform)
 }
 
 Result SaveWarpedImage(const std::filesystem::path& sourcePath,
+                       const ImageLoadOptions& sourceWindow,
                        const cv::Size& targetSize,
                        const Transform2D& transform,
                        const std::filesystem::path& outputPath)
 {
-    cv::Mat source = cv::imread(sourcePath.string(), cv::IMREAD_COLOR);
-    if (source.empty())
+    cv::Mat source;
+    const Result loadResult = ImageLoader{}.LoadColorImage(sourcePath, source, sourceWindow);
+    if (!loadResult.ok || source.empty())
     {
         return Result{false, "Could not load source image for export."};
     }
@@ -41,28 +43,34 @@ Result SaveWarpedImage(const std::filesystem::path& sourcePath,
 Result ExportController::ExportAlignedMovingToFixed(const std::filesystem::path& movingPath,
                                                     const std::filesystem::path& fixedPath,
                                                     const RegistrationResult& registration,
-                                                    const std::filesystem::path& outputPath) const
+                                                    const std::filesystem::path& outputPath,
+                                                    const ImageLoadOptions& movingWindow,
+                                                    const ImageLoadOptions& fixedWindow) const
 {
-    cv::Mat fixed = cv::imread(fixedPath.string(), cv::IMREAD_COLOR);
-    if (fixed.empty())
+    cv::Mat fixed;
+    const Result loadResult = ImageLoader{}.LoadColorImage(fixedPath, fixed, fixedWindow);
+    if (!loadResult.ok || fixed.empty())
     {
         return Result{false, "Could not load fixed image to determine export size."};
     }
 
-    return SaveWarpedImage(movingPath, fixed.size(), registration.forward, outputPath);
+    return SaveWarpedImage(movingPath, movingWindow, fixed.size(), registration.forward, outputPath);
 }
 
 Result ExportController::ExportAlignedFixedToMoving(const std::filesystem::path& fixedPath,
                                                     const std::filesystem::path& movingPath,
                                                     const RegistrationResult& registration,
-                                                    const std::filesystem::path& outputPath) const
+                                                    const std::filesystem::path& outputPath,
+                                                    const ImageLoadOptions& fixedWindow,
+                                                    const ImageLoadOptions& movingWindow) const
 {
-    cv::Mat moving = cv::imread(movingPath.string(), cv::IMREAD_COLOR);
-    if (moving.empty())
+    cv::Mat moving;
+    const Result loadResult = ImageLoader{}.LoadColorImage(movingPath, moving, movingWindow);
+    if (!loadResult.ok || moving.empty())
     {
         return Result{false, "Could not load moving image to determine export size."};
     }
 
-    return SaveWarpedImage(fixedPath, moving.size(), registration.inverse, outputPath);
+    return SaveWarpedImage(fixedPath, fixedWindow, moving.size(), registration.inverse, outputPath);
 }
 } // namespace align

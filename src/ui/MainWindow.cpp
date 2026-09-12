@@ -449,6 +449,96 @@ void MainWindow::DrawMenuBar(AppContext& context)
     ImGui::EndMenuBar();
 }
 
+void MainWindow::DrawStackOrientationControls(const char* idLabel, const char* stackLabel, StackModel& stack, int activeIndex,
+                                              int& rangeStart, int& rangeEnd)
+{
+    ImGui::PushID(idLabel);
+    ImGui::TextUnformatted(stackLabel);
+
+    if (stack.slices.empty() || activeIndex < 0 || activeIndex >= static_cast<int>(stack.slices.size()))
+    {
+        ImGui::TextDisabled("No active slice.");
+        ImGui::PopID();
+        return;
+    }
+
+    SliceRecord& slice = stack.slices[activeIndex];
+    ImGui::Text("Active slice: %d (%s)", activeIndex, slice.fileName.c_str());
+
+    ImGui::Checkbox("Flip Horizontal", &slice.flipHorizontal);
+    ShowHoveredHelp("Mirrors this slice left-right before alignment runs. Permanent for this slice until changed again.");
+    ImGui::SameLine();
+    ImGui::Checkbox("Flip Vertical", &slice.flipVertical);
+    ShowHoveredHelp("Mirrors this slice top-bottom before alignment runs. Permanent for this slice until changed again.");
+
+    if (ImGui::Button("Rotate 90 deg CCW"))
+    {
+        slice.rotationDegrees = (slice.rotationDegrees + 270) % 360;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Rotate 90 deg CW"))
+    {
+        slice.rotationDegrees = (slice.rotationDegrees + 90) % 360;
+    }
+    ShowHoveredHelp("Rotates this slice in 90 degree steps before alignment runs. No interpolation or cropping is applied.");
+
+    ImGui::TextWrapped("Flip H: %s | Flip V: %s | Rotation: %d deg",
+                       slice.flipHorizontal ? "yes" : "no", slice.flipVertical ? "yes" : "no", slice.rotationDegrees);
+
+    const int maxIndex = static_cast<int>(stack.slices.size()) - 1;
+    rangeStart = std::clamp(rangeStart, 0, maxIndex);
+    rangeEnd = std::clamp(rangeEnd, 0, maxIndex);
+    ImGui::SliderInt("Range Start", &rangeStart, 0, maxIndex);
+    ImGui::SliderInt("Range End", &rangeEnd, 0, maxIndex);
+
+    if (ImGui::Button("Apply to Range"))
+    {
+        const bool fh = slice.flipHorizontal;
+        const bool fv = slice.flipVertical;
+        const int rot = slice.rotationDegrees;
+        const int lo = (std::min)(rangeStart, rangeEnd);
+        const int hi = (std::max)(rangeStart, rangeEnd);
+        for (int i = lo; i <= hi && i < static_cast<int>(stack.slices.size()); ++i)
+        {
+            stack.slices[i].flipHorizontal = fh;
+            stack.slices[i].flipVertical = fv;
+            stack.slices[i].rotationDegrees = rot;
+        }
+    }
+    ShowHoveredHelp("Copies this slice's flip/rotation combination to every slice in [Range Start, Range End].");
+    ImGui::SameLine();
+    if (ImGui::Button("Apply to Whole Stack"))
+    {
+        const bool fh = slice.flipHorizontal;
+        const bool fv = slice.flipVertical;
+        const int rot = slice.rotationDegrees;
+        for (SliceRecord& s : stack.slices)
+        {
+            s.flipHorizontal = fh;
+            s.flipVertical = fv;
+            s.rotationDegrees = rot;
+        }
+    }
+    ShowHoveredHelp("Copies this slice's flip/rotation combination to every slice in this stack.");
+
+    ImGui::PopID();
+}
+
+void MainWindow::DrawImageOrientationSection(AppContext& context)
+{
+    TextWithHelp("Pre-Alignment Orientation",
+                "Corrects a slice's orientation (mirrored or upside-down scans) before any automatic or landmark "
+                "alignment runs. Changes are baked into the loaded image and persist until adjusted again.");
+
+    DrawStackOrientationControls("orient_a", "Stack A", context.session.stackA,
+                                 context.session.projectPreferences.activeSliceA,
+                                 m_orientationRangeStartA, m_orientationRangeEndA);
+    ImGui::Separator();
+    DrawStackOrientationControls("orient_b", "Stack B", context.session.stackB,
+                                 context.session.projectPreferences.activeSliceB,
+                                 m_orientationRangeStartB, m_orientationRangeEndB);
+}
+
 void MainWindow::DrawLeftPanel(AppContext& context, GLFWwindow* window)
 {
     // ---- Workflow phase banner ----
@@ -472,23 +562,23 @@ void MainWindow::DrawLeftPanel(AppContext& context, GLFWwindow* window)
     ImGui::TextColored(kPhaseColors[phaseIdx], "[ %s ]", kPhaseLabels[phaseIdx]);
     ImGui::Separator();
 
-    ImGui::TextUnformatted("Project");
+    if (ImGui::CollapsingHeader("Project & Stacks", ImGuiTreeNodeFlags_DefaultOpen))
+    {
     InputTextString("Session Name", context.session.projectName);
-    ImGui::Separator();
-
-    ImGui::TextUnformatted("Stacks");
     ImGui::TextWrapped("Stack A is always the reference stack. Stack B is always aligned onto Stack A.");
     DrawStackLoader(context, context.session.stackA);
     DrawStackLoader(context, context.session.stackB);
+    }
 
-    ImGui::Separator();
-    ImGui::TextUnformatted("Registration");
+    if (ImGui::CollapsingHeader("Registration Settings", ImGuiTreeNodeFlags_DefaultOpen))
+    {
     int presetIndex = FindRegistrationPresetIndex(context.session.projectPreferences.registrationPreset);
     if (ImGui::Combo("Preset", &presetIndex, kRegistrationPresetLabels, IM_ARRAYSIZE(kRegistrationPresetLabels)))
     {
         context.session.projectPreferences.registrationPreset = kRegistrationPresetValues[presetIndex];
         ApplyPresetDefaults(context.session.projectPreferences);
     }
+    ShowHoveredHelp("Shortcut that fills in Auto Method, Mask Strategy, Score Strategy, Refinement, and Transform type for a known modality pairing. Choose 'Custom' to configure those fields manually.");
     int autoMethodIndex = FindIndexForValue(context.session.projectPreferences.autoAlignmentMethod,
                                             kAutoMethodValues,
                                             IM_ARRAYSIZE(kAutoMethodValues));
@@ -496,6 +586,7 @@ void MainWindow::DrawLeftPanel(AppContext& context, GLFWwindow* window)
     {
         context.session.projectPreferences.autoAlignmentMethod = kAutoMethodValues[autoMethodIndex];
     }
+    ShowHoveredHelp("How the initial automatic alignment is computed: from a body mask's centroid/orientation, from manual landmarks only (auto disabled), or by refining an existing prior/convergence value only.");
     int maskMethodIndex = FindIndexForValue(context.session.projectPreferences.maskMethod,
                                             kMaskMethodValues,
                                             IM_ARRAYSIZE(kMaskMethodValues));
@@ -503,6 +594,7 @@ void MainWindow::DrawLeftPanel(AppContext& context, GLFWwindow* window)
     {
         context.session.projectPreferences.maskMethod = kMaskMethodValues[maskMethodIndex];
     }
+    ShowHoveredHelp("How the body/object mask used by the Auto Method is built: modality-specific segmentation, blue-background rejection, CT intensity threshold, or an externally supplied mask.");
     int scoreMethodIndex = FindIndexForValue(context.session.projectPreferences.scoreMethod,
                                              kScoreMethodValues,
                                              IM_ARRAYSIZE(kScoreMethodValues));
@@ -510,6 +602,7 @@ void MainWindow::DrawLeftPanel(AppContext& context, GLFWwindow* window)
     {
         context.session.projectPreferences.scoreMethod = kScoreMethodValues[scoreMethodIndex];
     }
+    ShowHoveredHelp("Metric used to evaluate alignment quality during the search: mask overlap plus gradient similarity, mask overlap only, or gradient only.");
     int refinementMethodIndex = FindIndexForValue(context.session.projectPreferences.refinementMethod,
                                                   kRefinementMethodValues,
                                                   IM_ARRAYSIZE(kRefinementMethodValues));
@@ -517,6 +610,7 @@ void MainWindow::DrawLeftPanel(AppContext& context, GLFWwindow* window)
     {
         context.session.projectPreferences.refinementMethod = kRefinementMethodValues[refinementMethodIndex];
     }
+    ShowHoveredHelp("Final fine-tuning step applied after the initial alignment: local similarity search, no refinement, or prior-guided refinement using nearby aligned slices.");
     // Transform type — radio buttons instead of freeform text
     {
         const bool isSimilarity = context.session.projectPreferences.transformType != "affine";
@@ -531,7 +625,9 @@ void MainWindow::DrawLeftPanel(AppContext& context, GLFWwindow* window)
     }
     ImGui::TextWrapped("%s", DescribeCurrentAutomaticPipeline(context.session.projectPreferences));
     ImGui::SliderInt("Max Iterations", &context.session.projectPreferences.maxIterations, 1, 250);
+    ShowHoveredHelp("Upper bound on optimizer iterations for the automatic search. Higher values can improve convergence on difficult pairs at the cost of speed.");
     ImGui::SliderInt("Coarse Levels", &context.session.projectPreferences.coarseLevels, 1, 6);
+    ShowHoveredHelp("Number of multi-scale pyramid levels used during the search. More levels help converge from large initial offsets but take longer.");
     ImGui::Checkbox("Use Alignment In Preview", &context.session.projectPreferences.useAlignmentPreview);
     ShowHoveredHelp("When enabled, the preview viewer composites the moving image after applying the current alignment or selected history snapshot.");
     ImGui::Checkbox("Sigma-Restricted Prior", &context.session.projectPreferences.useSigmaRestrictedPriorRefinement);
@@ -540,6 +636,15 @@ void MainWindow::DrawLeftPanel(AppContext& context, GLFWwindow* window)
     ShowHoveredHelp("Controls how tightly the search is constrained around local prior statistics.");
     ImGui::Checkbox("Prefer Manual Priors", &context.session.projectPreferences.preferManualPriors);
     ShowHoveredHelp("When manual landmark-aligned slices exist nearby, use them preferentially to compute local priors.");
+    }
+
+    if (ImGui::CollapsingHeader("Image Orientation", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        DrawImageOrientationSection(context);
+    }
+
+    if (ImGui::CollapsingHeader("Run & Export", ImGuiTreeNodeFlags_DefaultOpen))
+    {
     TextWithHelp("Registration Actions", "Run a single alignment, process the full stack, export results, or enter manual landmark editing.");
     if (!m_currentAlignmentTask.has_value() && ImGui::Button("Run Current Alignment"))
     {
@@ -629,27 +734,6 @@ void MainWindow::DrawLeftPanel(AppContext& context, GLFWwindow* window)
         }
     }
 
-    if (ImGui::Button(context.landmarkModeEnabled ? "Disable Landmark Mode" : "Enable Landmark Mode"))
-    {
-        context.landmarkModeEnabled = !context.landmarkModeEnabled;
-        if (!context.landmarkModeEnabled)
-        {
-            context.pendingLandmarkPoint.hasMovingPoint = false;
-            context.landmarkEditState.selectedIndex = -1;
-            context.landmarkEditState.target = LandmarkEditTarget::None;
-            context.landmarkEditState.isDragging = false;
-            m_lastMessage = "Landmark mode disabled.";
-        }
-        else
-        {
-            context.session.projectPreferences.useAlignmentPreview = true;
-            m_lastMessage = "Landmark mode enabled. Click a point in Stack B, then the matching point in Stack A.";
-        }
-    }
-    if (context.landmarkModeEnabled)
-    {
-        ImGui::TextWrapped("Landmark mode is active. The preview updates in real time as soon as at least 2 pairs exist.");
-    }
     if (ImGui::Button("Analyze Convergence"))
     {
         AnalyzeConvergence(context);
@@ -735,8 +819,37 @@ void MainWindow::DrawLeftPanel(AppContext& context, GLFWwindow* window)
         ImGui::Separator();
         ImGui::TextWrapped("%s", m_backgroundStatus.c_str());
     }
+    }
 
+    if (ImGui::CollapsingHeader("Landmark Workflow", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+    if (ImGui::Button(context.landmarkModeEnabled ? "Disable Landmark Mode" : "Enable Landmark Mode"))
+    {
+        context.landmarkModeEnabled = !context.landmarkModeEnabled;
+        if (!context.landmarkModeEnabled)
+        {
+            context.pendingLandmarkPoint.hasMovingPoint = false;
+            context.landmarkEditState.selectedIndex = -1;
+            context.landmarkEditState.target = LandmarkEditTarget::None;
+            context.landmarkEditState.isDragging = false;
+            m_lastMessage = "Landmark mode disabled.";
+        }
+        else
+        {
+            context.session.projectPreferences.useAlignmentPreview = true;
+            m_lastMessage = "Landmark mode enabled. Click a point in Stack B, then the matching point in Stack A.";
+        }
+    }
+    if (context.landmarkModeEnabled)
+    {
+        ImGui::TextWrapped("Landmark mode is active. The preview updates in real time as soon as at least 2 pairs exist.");
+    }
     ImGui::Separator();
+    DrawLandmarkEditor(context);
+    }
+
+    if (ImGui::CollapsingHeader("Preview & Display", ImGuiTreeNodeFlags_DefaultOpen))
+    {
     ImGui::TextUnformatted("UI Scale");
     const bool isAuto = context.session.uiPreferences.dpiMode == DpiMode::Auto;
     if (ImGui::RadioButton("Auto", isAuto))
@@ -762,9 +875,7 @@ void MainWindow::DrawLeftPanel(AppContext& context, GLFWwindow* window)
     ImGui::SliderFloat("Blend Alpha", &context.session.uiPreferences.blendAlpha, 0.0f, 1.0f, "%.2f");
     ImGui::SliderInt("Checker Size", &context.session.uiPreferences.checkerSize, 4, 128);
     ImGui::Checkbox("Sync Viewports", &context.session.uiPreferences.syncViewports);
-
-    ImGui::Separator();
-    DrawLandmarkEditor(context);
+    }
 
     ImGui::Separator();
     if (!m_lastMessage.empty())
@@ -994,20 +1105,25 @@ void MainWindow::DrawStackLoader(AppContext& context, StackModel& stack)
     ImGui::PushID(stack.id.c_str());
     InputTextString("Name", stack.name);
     InputTextString("Modality", stack.modality);
+    ImGui::BeginDisabled();
     InputTextString("Directory", stack.directory);
-    ImGui::SameLine();
-    if (ImGui::Button("Browse..."))
+    ImGui::EndDisabled();
+    if (ImGui::Button("Browse && Load..."))
     {
         const auto selectedFolder = ShowSelectFolderDialog(L"Select Image Stack Folder");
         if (selectedFolder.has_value())
         {
             stack.directory = selectedFolder->string();
+            LoadStack(context, stack);
         }
     }
-    if (ImGui::Button("Load Directory"))
+    ShowHoveredHelp("Opens the Windows folder picker and loads the selected folder as this stack immediately.");
+    ImGui::SameLine();
+    if (ImGui::Button("Reload"))
     {
         LoadStack(context, stack);
     }
+    ShowHoveredHelp("Re-scans the currently selected directory (use after adding/removing files on disk).");
     ImGui::SameLine();
     ImGui::Text("%d slices", static_cast<int>(stack.slices.size()));
     ImGui::PopID();
@@ -1067,6 +1183,8 @@ void MainWindow::RunCurrentAlignment(AppContext& context)
 
     const SliceRecord& fixedSlice = context.session.stackA.slices[pair.fixedIndex];
     const SliceRecord& movingSlice = context.session.stackB.slices[pair.movingIndex];
+    const ImageLoadOptions fixedWindow = MakeDefaultLoadOptions(context.session.stackA, fixedSlice);
+    const ImageLoadOptions movingWindow = MakeDefaultLoadOptions(context.session.stackB, movingSlice);
     const bool useAffine = context.session.projectPreferences.transformType == "affine";
     const std::string autoMethod = context.session.projectPreferences.autoAlignmentMethod;
     const bool useSigmaBounds = context.session.projectPreferences.useSigmaRestrictedPriorRefinement;
@@ -1087,7 +1205,7 @@ void MainWindow::RunCurrentAlignment(AppContext& context)
     m_backgroundStatus = "Running current alignment...";
     m_currentAlignmentTask = std::async(
         std::launch::async,
-        [fixedSlice, movingSlice, pair, pairListIndex, autoMethod, useAffine, useSigmaBounds, sigmaMultiplier, existingCopy]()
+        [fixedSlice, movingSlice, fixedWindow, movingWindow, pair, pairListIndex, autoMethod, useAffine, useSigmaBounds, sigmaMultiplier, existingCopy]()
         {
             CurrentAlignmentTaskResult taskResult;
             taskResult.pairListIndex = pairListIndex;
@@ -1119,8 +1237,8 @@ void MainWindow::RunCurrentAlignment(AppContext& context)
 
             cv::Mat movingImage;
             cv::Mat fixedImage;
-            Result loadMoving = imageLoader.LoadColorImage(movingSlice.filePath, movingImage);
-            Result loadFixed = imageLoader.LoadColorImage(fixedSlice.filePath, fixedImage);
+            Result loadMoving = imageLoader.LoadColorImage(movingSlice.filePath, movingImage, movingWindow);
+            Result loadFixed = imageLoader.LoadColorImage(fixedSlice.filePath, fixedImage, fixedWindow);
             if (!loadMoving.ok || !loadFixed.ok)
             {
                 taskResult.result = Result{false, "Could not load the active pair for registration."};
@@ -1191,6 +1309,8 @@ void MainWindow::RunBatchAlignment(AppContext& context)
     }
     const std::vector<SliceRecord> fixedSlices = context.session.stackA.slices;
     const std::vector<SliceRecord> movingSlices = context.session.stackB.slices;
+    const ImageLoadOptions fixedWindowBase = MakeDefaultLoadOptions(context.session.stackA, SliceRecord{});
+    const ImageLoadOptions movingWindowBase = MakeDefaultLoadOptions(context.session.stackB, SliceRecord{});
     const bool useAffine = context.session.projectPreferences.transformType == "affine";
     const bool useSigmaBounds = context.session.projectPreferences.useSigmaRestrictedPriorRefinement;
     const double sigmaMultiplier = context.session.projectPreferences.sigmaMultiplier;
@@ -1209,7 +1329,7 @@ void MainWindow::RunBatchAlignment(AppContext& context)
     m_batchTaskProgress = progress;
     context.session.workflowPhase = WorkflowPhase::InitialAlignment;
     m_batchTask = std::async(std::launch::async,
-                             [pairs, registrations, fixedSlices, movingSlices, autoMethod, useAffine,
+                             [pairs, registrations, fixedSlices, movingSlices, fixedWindowBase, movingWindowBase, autoMethod, useAffine,
                               useSigmaBounds, sigmaMultiplier, progress]()
                              {
                                  BatchTaskResult taskResult;
@@ -1252,11 +1372,13 @@ void MainWindow::RunBatchAlignment(AppContext& context)
 
                                      const SliceRecord& fixedSlice = fixedSlices[pair.fixedIndex];
                                      const SliceRecord& movingSlice = movingSlices[pair.movingIndex];
+                                     const ImageLoadOptions fixedWindow = WithOrientation(fixedWindowBase, fixedSlice);
+                                     const ImageLoadOptions movingWindow = WithOrientation(movingWindowBase, movingSlice);
 
                                      cv::Mat movingImage;
                                      cv::Mat fixedImage;
-                                     Result loadMoving = imageLoader.LoadColorImage(movingSlice.filePath, movingImage);
-                                     Result loadFixed = imageLoader.LoadColorImage(fixedSlice.filePath, fixedImage);
+                                     Result loadMoving = imageLoader.LoadColorImage(movingSlice.filePath, movingImage, movingWindow);
+                                     Result loadFixed = imageLoader.LoadColorImage(fixedSlice.filePath, fixedImage, fixedWindow);
                                      if (!loadMoving.ok || !loadFixed.ok)
                                      {
                                          pair.status = PairStatus::Suspect;
@@ -1430,10 +1552,13 @@ void MainWindow::ExportCurrentAligned(AppContext& context)
     const std::filesystem::path fixedToMovingPath =
         *outputDir / ("fixedA_to_movingB_A" + std::to_string(pair->fixedIndex) + "_B" + std::to_string(pair->movingIndex) + ".png");
 
+    const ImageLoadOptions fixedWindow = MakeDefaultLoadOptions(context.session.stackA, fixedSlice);
+    const ImageLoadOptions movingWindow = MakeDefaultLoadOptions(context.session.stackB, movingSlice);
+
     Result exportForward = m_exportController.ExportAlignedMovingToFixed(
-        movingSlice.filePath, fixedSlice.filePath, *registration, movingToFixedPath);
+        movingSlice.filePath, fixedSlice.filePath, *registration, movingToFixedPath, movingWindow, fixedWindow);
     Result exportInverse = m_exportController.ExportAlignedFixedToMoving(
-        fixedSlice.filePath, movingSlice.filePath, *registration, fixedToMovingPath);
+        fixedSlice.filePath, movingSlice.filePath, *registration, fixedToMovingPath, fixedWindow, movingWindow);
 
     if (!exportForward.ok || !exportInverse.ok)
     {
@@ -1463,6 +1588,8 @@ void MainWindow::ExportBatchAligned(AppContext& context)
     std::vector<RegistrationResult> registrations = context.session.registrations;
     const std::vector<SliceRecord>  fixedSlices   = context.session.stackA.slices;
     const std::vector<SliceRecord>  movingSlices  = context.session.stackB.slices;
+    const ImageLoadOptions fixedWindowBase = MakeDefaultLoadOptions(context.session.stackA, SliceRecord{});
+    const ImageLoadOptions movingWindowBase = MakeDefaultLoadOptions(context.session.stackB, SliceRecord{});
     const std::filesystem::path     baseDir       = *outputDir;
 
     int total = 0;
@@ -1483,7 +1610,7 @@ void MainWindow::ExportBatchAligned(AppContext& context)
 
     m_exportBatchTask = std::async(
         std::launch::async,
-        [pairs, registrations, fixedSlices, movingSlices, baseDir, progress]()
+        [pairs, registrations, fixedSlices, movingSlices, fixedWindowBase, movingWindowBase, baseDir, progress]()
         {
             ExportBatchTaskResult taskResult;
             taskResult.total = static_cast<int>(pairs.size());
@@ -1530,14 +1657,17 @@ void MainWindow::ExportBatchAligned(AppContext& context)
                     baseDir / "fixed_to_moving" /
                     ("A" + std::to_string(pair.fixedIndex) + "_to_B" + std::to_string(pair.movingIndex) + ".png");
 
+                const ImageLoadOptions fixedWindow = WithOrientation(fixedWindowBase, fixedSlices[pair.fixedIndex]);
+                const ImageLoadOptions movingWindow = WithOrientation(movingWindowBase, movingSlices[pair.movingIndex]);
+
                 Result fwd = exportController.ExportAlignedMovingToFixed(
                     movingSlices[pair.movingIndex].filePath,
                     fixedSlices[pair.fixedIndex].filePath,
-                    *reg, movingToFixedPath);
+                    *reg, movingToFixedPath, movingWindow, fixedWindow);
                 Result inv = exportController.ExportAlignedFixedToMoving(
                     fixedSlices[pair.fixedIndex].filePath,
                     movingSlices[pair.movingIndex].filePath,
-                    *reg, fixedToMovingPath);
+                    *reg, fixedToMovingPath, fixedWindow, movingWindow);
 
                 progress->attempted.fetch_add(1);
 
@@ -1630,11 +1760,6 @@ void MainWindow::DrawLandmarkEditor(AppContext& context)
         return;
     }
 
-    if (ImGui::Button("Add Landmark"))
-    {
-        registration->landmarks.push_back({});
-    }
-    ImGui::SameLine();
     if (ImGui::Button("Clear Landmarks"))
     {
         registration->landmarks.clear();
@@ -1643,7 +1768,7 @@ void MainWindow::DrawLandmarkEditor(AppContext& context)
         context.landmarkEditState.isDragging = false;
     }
 
-    ImGui::TextWrapped("Clique primeiro na imagem movel (Stack B) e depois na referencia (Stack A) para criar um par. Clique sobre um ponto para selecionar e arrastar. Use Delete para remover o ponto selecionado.");
+    ImGui::TextWrapped("Clique na imagem movel (Stack B) e depois na referencia (Stack A) para criar um par no ponto exato do clique (o cursor mostra uma mira). Aproxime o cursor de um ponto existente para arrasta-lo (o cursor muda para uma mao). Use Delete para remover o ponto selecionado.");
     if (static_cast<int>(registration->landmarks.size()) < 2)
     {
         ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.35f, 1.0f), "At least 2 landmark pairs are required.");
@@ -2046,6 +2171,8 @@ void MainWindow::RunPriorRefinement(AppContext& context)
     std::vector<RegistrationResult> registrations = context.session.registrations;
     const std::vector<SliceRecord>  fixedSlices   = context.session.stackA.slices;
     const std::vector<SliceRecord>  movingSlices  = context.session.stackB.slices;
+    const ImageLoadOptions fixedWindowBase = MakeDefaultLoadOptions(context.session.stackA, SliceRecord{});
+    const ImageLoadOptions movingWindowBase = MakeDefaultLoadOptions(context.session.stackB, SliceRecord{});
 
     int total = 0;
     for (const RegistrationResult& r : registrations)
@@ -2065,7 +2192,7 @@ void MainWindow::RunPriorRefinement(AppContext& context)
 
     m_priorRefinementTask = std::async(
         std::launch::async,
-        [registrations, fixedSlices, movingSlices, useAffine, useSigmaBounds, sigmaMultiplier, preferManualPriors, progress]() mutable
+        [registrations, fixedSlices, movingSlices, fixedWindowBase, movingWindowBase, useAffine, useSigmaBounds, sigmaMultiplier, preferManualPriors, progress]() mutable
         {
             PriorRefinementTaskResult taskResult;
             taskResult.registrations = registrations;
@@ -2100,9 +2227,12 @@ void MainWindow::RunPriorRefinement(AppContext& context)
                         " -> A:" + std::to_string(reg.fixedIndex);
                 }
 
+                const ImageLoadOptions movingWindow = WithOrientation(movingWindowBase, movingSlices[reg.movingIndex]);
+                const ImageLoadOptions fixedWindow = WithOrientation(fixedWindowBase, fixedSlices[reg.fixedIndex]);
+
                 cv::Mat movingImage, fixedImage;
-                if (!imageLoader.LoadColorImage(movingSlices[reg.movingIndex].filePath, movingImage).ok ||
-                    !imageLoader.LoadColorImage(fixedSlices[reg.fixedIndex].filePath,   fixedImage).ok)
+                if (!imageLoader.LoadColorImage(movingSlices[reg.movingIndex].filePath, movingImage, movingWindow).ok ||
+                    !imageLoader.LoadColorImage(fixedSlices[reg.fixedIndex].filePath,   fixedImage, fixedWindow).ok)
                 {
                     progress->attempted.fetch_add(1);
                     continue;
@@ -2285,6 +2415,10 @@ void MainWindow::ProcessAsyncTasks(AppContext& context)
                 result.stackId == context.session.stackA.id ? context.session.stackA : context.session.stackB;
             m_lastMessage = "Loaded " + std::to_string(loadedStack.slices.size()) + " slices from " +
                             loadedStack.directory;
+            if (!result.result.message.empty())
+            {
+                m_lastMessage += " " + result.result.message;
+            }
         }
     }
 
@@ -2497,6 +2631,8 @@ void MainWindow::ExportAnimatedPreview(AppContext& context)
     std::vector<RegistrationResult> registrations = context.session.registrations;
     const std::vector<SliceRecord>  fixedSlices   = context.session.stackA.slices;
     const std::vector<SliceRecord>  movingSlices  = context.session.stackB.slices;
+    const ImageLoadOptions fixedWindowBase = MakeDefaultLoadOptions(context.session.stackA, SliceRecord{});
+    const ImageLoadOptions movingWindowBase = MakeDefaultLoadOptions(context.session.stackB, SliceRecord{});
     const std::filesystem::path     outputPath    = *savePath;
     const UiPreferences             uiPrefs       = context.session.uiPreferences;
 
@@ -2511,7 +2647,7 @@ void MainWindow::ExportAnimatedPreview(AppContext& context)
 
     m_animatedExportTask = std::async(
         std::launch::async,
-        [pairs, registrations, fixedSlices, movingSlices, outputPath,
+        [pairs, registrations, fixedSlices, movingSlices, fixedWindowBase, movingWindowBase, outputPath,
          anim, uiPrefs, startIdx, endIdx, total, progress]() mutable
         {
             using namespace cv;
@@ -2526,7 +2662,9 @@ void MainWindow::ExportAnimatedPreview(AppContext& context)
                 const PairRecord& pair = pairs[i];
                 if (!pair.valid) continue;
                 if (pair.fixedIndex < 0 || pair.fixedIndex >= static_cast<int>(fixedSlices.size())) continue;
-                Mat probe = imread(fixedSlices[pair.fixedIndex].filePath, IMREAD_COLOR);
+                Mat probe;
+                ImageLoader{}.LoadColorImage(fixedSlices[pair.fixedIndex].filePath, probe,
+                                             WithOrientation(fixedWindowBase, fixedSlices[pair.fixedIndex]));
                 if (!probe.empty())
                 {
                     frameSize = probe.size();
@@ -2573,8 +2711,10 @@ void MainWindow::ExportAnimatedPreview(AppContext& context)
                         pair.movingIndex >= 0 && pair.movingIndex < static_cast<int>(movingSlices.size()))
                     {
                         Mat imageA, imageB;
-                        loader.LoadColorImage(fixedSlices[pair.fixedIndex].filePath,   imageA);
-                        loader.LoadColorImage(movingSlices[pair.movingIndex].filePath, imageB);
+                        loader.LoadColorImage(fixedSlices[pair.fixedIndex].filePath, imageA,
+                                              WithOrientation(fixedWindowBase, fixedSlices[pair.fixedIndex]));
+                        loader.LoadColorImage(movingSlices[pair.movingIndex].filePath, imageB,
+                                              WithOrientation(movingWindowBase, movingSlices[pair.movingIndex]));
 
                         if (!imageA.empty() && !imageB.empty())
                         {
@@ -2702,6 +2842,7 @@ void MainWindow::DrawOperationStack(AppContext& context)
         }
 
         const bool selected = context.selectedOperationId == operation.id;
+        ImGui::PushID(i);
         if (ImGui::Selectable(label.str().c_str(), selected))
         {
             context.selectedOperationId = operation.id;
@@ -2722,6 +2863,7 @@ void MainWindow::DrawOperationStack(AppContext& context)
             }
             ImGui::EndTooltip();
         }
+        ImGui::PopID();
     }
 }
 
@@ -2806,6 +2948,7 @@ void MainWindow::DrawOperationHistory(AppContext& context)
         const RegistrationSnapshot& snapshot = reg->history[static_cast<size_t>(i)];
         const bool selected = context.selectedHistoryIndex == i;
         std::string label = snapshot.label.empty() ? ("Step " + std::to_string(i + 1)) : snapshot.label;
+        ImGui::PushID(i);
         if (ImGui::Selectable(label.c_str(), selected))
         {
             context.selectedHistoryIndex = i;
@@ -2825,6 +2968,7 @@ void MainWindow::DrawOperationHistory(AppContext& context)
             }
             ImGui::EndTooltip();
         }
+        ImGui::PopID();
     }
 
     if (reg->convergenceOutlier)

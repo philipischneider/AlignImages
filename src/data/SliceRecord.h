@@ -25,6 +25,11 @@ struct SliceRecord
     int height = 0;
     bool hasThumbnail = false;
     SliceStatus status = SliceStatus::None;
+    int instanceNumber = -1;
+    double sliceLocation = 0.0;
+    bool flipHorizontal = false;
+    bool flipVertical = false;
+    int rotationDegrees = 0; // 0, 90, 180, 270 -- clockwise
 };
 } // namespace align
 

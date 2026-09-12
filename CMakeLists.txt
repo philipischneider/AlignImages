@@ -30,6 +30,8 @@ set(ALIGN_IMAGES_SOURCES
     src/data/RegistrationResult.cpp
     src/io/DirectoryScanner.cpp
     src/io/ImageLoader.cpp
+    src/io/DicomLoader.cpp
+    src/io/DicomPixelCache.cpp
     src/io/SessionSerializer.cpp
     src/export/ExportController.cpp
     src/registration/ConvergenceAnalyzer.cpp
@@ -64,6 +66,8 @@ endif()
 find_package(OpenGL REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(glfw3 CONFIG REQUIRED)
+find_package(GDCM REQUIRED)
+include(${GDCM_USE_FILE})
 
 find_package(nlohmann_json CONFIG QUIET)
 
@@ -76,6 +80,7 @@ target_link_libraries(AlignImages
         Shell32
         Comdlg32
         ${OpenCV_LIBS}
+        gdcmMSFF
 )
 
 if(TARGET nlohmann_json::nlohmann_json)
@@ -86,7 +91,7 @@ else()
     message(FATAL_ERROR "nlohmann/json not found. Install the package or place json.hpp under third_party/nlohmann.")
 endif()
 
-target_include_directories(AlignImages PRIVATE ${OpenCV_INCLUDE_DIRS})
+target_include_directories(AlignImages PRIVATE ${OpenCV_INCLUDE_DIRS} ${GDCM_INCLUDE_DIRS})
 
 set(IMGUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui")
 

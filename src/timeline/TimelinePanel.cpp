@@ -6,6 +6,7 @@
 #include <opencv2/imgproc.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -114,12 +115,12 @@ void TimelinePanel::Draw(AppContext& context, float height)
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
     {
         ImGui::SetTooltip("Thumbnail timeline for both stacks.\n"
-                          "Drag the strip to adjust pairing offsets.\n"
+                          "Click and drag anywhere on a stack's colored block to shift its pairing offset.\n"
                           "Markers below thumbnails:\n"
                           "  amber  = real landmarks placed manually\n"
                           "  violet = transform propagated (no landmark points)");
     }
-    ImGui::TextWrapped("Arraste a faixa de cada timeline para deslocar visualmente os stacks e ajustar a correspondencia.");
+    ImGui::TextWrapped("Clique e arraste o bloco colorido de cada stack (como um clipe de video) para deslocar a correspondencia.");
     ImGui::Text("Derived Offset (B -> A): %d", context.session.pairing.globalOffset);
     ImGui::Separator();
 
@@ -166,14 +167,29 @@ float TimelinePanel::DrawStackTimeline(AppContext& context,
     ImGui::Text("%s (%d slices)", label, static_cast<int>(stack.slices.size()));
 
     ImGui::PushID(label);
-    ImGui::InvisibleButton("drag_strip", ImVec2((std::max)(ImGui::GetContentRegionAvail().x, 180.0f), 18.0f));
+
+    constexpr float kClipLabelBandHeight = 20.0f;
+    constexpr float kRowHeight = kClipLabelBandHeight + kThumbnailButtonSize + 34.0f;
+    const float clipWidth = static_cast<float>(stack.slices.size()) * kTimelineCellAdvance;
+    const float trackWidth = (std::max)(ImGui::GetContentRegionAvail().x,
+                                        static_cast<float>(normalizedOffset) * kTimelineCellAdvance + clipWidth + 24.0f);
+
+    const ImVec2 trackOrigin = ImGui::GetCursorScreenPos();
+
+    // The whole row is one drag surface: clicking and dragging anywhere on the clip -- including on
+    // top of a thumbnail -- shifts the pairing offset, like dragging a clip in a video editor timeline.
+    // A short click without movement still reaches the thumbnail button drawn on top (see below), which
+    // handles slice selection independently.
+    ImGui::SetNextItemAllowOverlap();
+    ImGui::InvisibleButton("drag_track", ImVec2(trackWidth, kRowHeight));
     if (ImGui::IsItemActivated())
     {
         m_draggingTimelineId = label;
         m_dragStartMouseX = ImGui::GetIO().MousePos.x;
         m_dragStartOffset = timelineOffset;
     }
-    if (m_draggingTimelineId == label && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+    const bool isDraggingThis = (m_draggingTimelineId == label);
+    if (isDraggingThis && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
     {
         const float deltaX = ImGui::GetIO().MousePos.x - m_dragStartMouseX;
         const int deltaSlots = static_cast<int>(std::round(deltaX / kTimelineCellAdvance));
@@ -184,29 +200,39 @@ float TimelinePanel::DrawStackTimeline(AppContext& context,
             RebuildPairs(context.session);
         }
     }
-    if (m_draggingTimelineId == label && ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+    if (isDraggingThis && ImGui::IsMouseReleased(ImGuiMouseButton_Left))
     {
         m_draggingTimelineId.clear();
     }
 
-    const ImVec2 stripMin = ImGui::GetItemRectMin();
-    const ImVec2 stripMax = ImGui::GetItemRectMax();
     ImDrawList* drawList = ImGui::GetWindowDrawList();
-    drawList->AddRectFilled(stripMin, stripMax, IM_COL32(55, 61, 72, 255), 4.0f);
-    drawList->AddText(ImVec2(stripMin.x + 8.0f, stripMin.y + 2.0f),
-                      IM_COL32(220, 226, 235, 255),
-                      "Drag this strip to move the timeline");
+    const bool isStackA = (&stack == &context.session.stackA);
+    const ImU32 clipColor = isStackA ? IM_COL32(40, 78, 122, 255) : IM_COL32(140, 84, 28, 255);
+    const ImU32 clipLabelBandColor = isStackA ? IM_COL32(30, 60, 96, 255) : IM_COL32(110, 64, 20, 255);
 
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + normalizedOffset * kTimelineCellAdvance);
+    const float clipStartX = trackOrigin.x + static_cast<float>(normalizedOffset) * kTimelineCellAdvance;
+    const ImVec2 clipMin(clipStartX, trackOrigin.y);
+    const ImVec2 clipMax(clipStartX + clipWidth, trackOrigin.y + kRowHeight);
+    drawList->AddRectFilled(clipMin, clipMax, clipColor, 6.0f);
+    drawList->AddRectFilled(clipMin, ImVec2(clipMax.x, clipMin.y + kClipLabelBandHeight), clipLabelBandColor, 6.0f,
+                            ImDrawFlags_RoundCornersTop);
+    drawList->AddText(ImVec2(clipMin.x + 8.0f, clipMin.y + 2.0f), IM_COL32(235, 240, 245, 255), label);
+    if (isDraggingThis)
+    {
+        drawList->AddRect(clipMin, clipMax, IM_COL32(255, 255, 255, 230), 6.0f, 0, 2.5f);
+    }
+
     const float scrollX = ImGui::GetScrollX();
     const float viewWidth = ImGui::GetWindowWidth();
     const int firstVisibleIndex = (std::max)(0, static_cast<int>(std::floor((scrollX / kTimelineCellAdvance))) - normalizedOffset - 2);
     const int lastVisibleIndex = (std::min)(static_cast<int>(stack.slices.size()) - 1,
                                             static_cast<int>(std::ceil((scrollX + viewWidth) / kTimelineCellAdvance)) - normalizedOffset + 2);
 
-    for (int i = 0; i < static_cast<int>(stack.slices.size()); ++i)
+    for (int i = firstVisibleIndex; i <= lastVisibleIndex; ++i)
     {
         ImGui::PushID(i);
+        ImGui::SetCursorScreenPos(ImVec2(clipStartX + static_cast<float>(i) * kTimelineCellAdvance,
+                                         trackOrigin.y + kClipLabelBandHeight + 4.0f));
         const bool isActive = (i == activeIndex);
         PairStatus status = PairStatus::Unmatched;
         if (&stack == &context.session.stackA)
@@ -233,9 +259,9 @@ float TimelinePanel::DrawStackTimeline(AppContext& context,
 
         bool clicked = false;
         ImageTexture* thumbnail = nullptr;
-        if (!context.batchProcessState.running && i >= firstVisibleIndex && i <= lastVisibleIndex)
+        if (!context.batchProcessState.running)
         {
-            thumbnail = GetOrCreateThumbnail(stack.slices[i]);
+            thumbnail = GetOrCreateThumbnail(stack, stack.slices[i]);
         }
         ImGui::BeginGroup();
         if (thumbnail != nullptr && thumbnail->IsValid())
@@ -297,38 +323,26 @@ float TimelinePanel::DrawStackTimeline(AppContext& context,
         }
 
         ImGui::PopStyleColor(3);
-
-        if (i + 1 < static_cast<int>(stack.slices.size()))
-        {
-            ImGui::SameLine();
-        }
         ImGui::PopID();
     }
 
-    const float contentWidth = normalizedOffset * kTimelineCellAdvance +
-                               static_cast<float>(stack.slices.size()) * kTimelineCellAdvance + 24.0f;
+    ImGui::SetCursorScreenPos(ImVec2(trackOrigin.x, trackOrigin.y + kRowHeight));
     ImGui::PopID();
-    return contentWidth;
+    return trackWidth;
 }
 
-ImageTexture* TimelinePanel::GetOrCreateThumbnail(const SliceRecord& slice)
+namespace
 {
-    if (slice.filePath.empty())
-    {
-        return nullptr;
-    }
+constexpr size_t kMaxConcurrentThumbnailDecodes = 2;
 
-    auto found = m_thumbnailCache.find(slice.filePath);
-    if (found != m_thumbnailCache.end())
-    {
-        return found->second.texture.get();
-    }
-
+cv::Mat DecodeThumbnail(const std::string& filePath, const ImageLoadOptions& loadOptions)
+{
     cv::Mat image;
-    const Result result = m_imageLoader.LoadColorImage(slice.filePath, image);
+    ImageLoader loader;
+    const Result result = loader.LoadColorImage(filePath, image, loadOptions);
     if (!result.ok || image.empty())
     {
-        return nullptr;
+        return cv::Mat{};
     }
 
     constexpr int kThumbnailSize = 64;
@@ -336,16 +350,67 @@ ImageTexture* TimelinePanel::GetOrCreateThumbnail(const SliceRecord& slice)
                                            static_cast<double>((std::max)(image.cols, image.rows)));
     cv::Mat thumbnail;
     cv::resize(image, thumbnail, cv::Size(), scale, scale, cv::INTER_AREA);
+    return thumbnail;
+}
 
-    ThumbnailEntry entry;
-    entry.filePath = slice.filePath;
-    entry.texture = std::make_unique<ImageTexture>();
-    if (!entry.texture->Upload(thumbnail).ok)
+std::string MakeThumbnailCacheKey(const SliceRecord& slice)
+{
+    return slice.filePath + "|" + (slice.flipHorizontal ? "1" : "0") + (slice.flipVertical ? "1" : "0") +
+           std::to_string(slice.rotationDegrees);
+}
+} // namespace
+
+ImageTexture* TimelinePanel::GetOrCreateThumbnail(const StackModel& stack, const SliceRecord& slice)
+{
+    if (slice.filePath.empty())
     {
         return nullptr;
     }
 
-    auto [it, inserted] = m_thumbnailCache.emplace(slice.filePath, std::move(entry));
-    return it->second.texture.get();
+    const std::string cacheKey = MakeThumbnailCacheKey(slice);
+
+    auto found = m_thumbnailCache.find(cacheKey);
+    if (found != m_thumbnailCache.end())
+    {
+        return found->second.texture.get();
+    }
+
+    auto pending = m_pendingThumbnails.find(cacheKey);
+    if (pending != m_pendingThumbnails.end())
+    {
+        if (pending->second.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+        {
+            return nullptr; // still decoding in the background
+        }
+
+        cv::Mat thumbnail = pending->second.get();
+        m_pendingThumbnails.erase(pending);
+        if (thumbnail.empty())
+        {
+            return nullptr;
+        }
+
+        ThumbnailEntry entry;
+        entry.filePath = slice.filePath;
+        entry.texture = std::make_unique<ImageTexture>();
+        if (!entry.texture->Upload(thumbnail).ok)
+        {
+            return nullptr;
+        }
+
+        auto [it, inserted] = m_thumbnailCache.emplace(cacheKey, std::move(entry));
+        return it->second.texture.get();
+    }
+
+    if (m_pendingThumbnails.size() >= kMaxConcurrentThumbnailDecodes)
+    {
+        return nullptr; // avoid flooding the disk with many concurrent random reads
+    }
+
+    const std::string filePath = slice.filePath;
+    const ImageLoadOptions loadOptions = MakeDefaultLoadOptions(stack, slice);
+    m_pendingThumbnails.emplace(cacheKey,
+                                std::async(std::launch::async, DecodeThumbnail, filePath, loadOptions));
+    return nullptr;
 }
 } // namespace align

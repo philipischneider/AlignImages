@@ -16,6 +16,7 @@ O projeto foi desenhado para Windows e hoje já cobre:
 - batch assíncrono com progresso e cancelamento
 - salvamento e reabertura de sessão em JSON
 - exportação nas direções móvel -> referência e referência -> móvel
+- carregamento de séries DICOM (CT/RM) como stack, com Window/Level ajustável na exibição
 
 ## Estrutura
 
@@ -33,10 +34,17 @@ O projeto foi desenhado para Windows e hoje já cobre:
 - OpenGL
 - OpenCV
 - nlohmann/json
+- GDCM (leitura de DICOM; instalado via vcpkg modo clássico, sem manifest — versão testada: 3.2.5. Como não há `vcpkg.json`, não há fixação automática de versão; um `vcpkg upgrade` pode trocar a versão instalada silenciosamente)
 
 ## Build no Windows
 
 O projeto usa CMake com presets definidos em `CMakePresets.json`. O diretório de build fica sempre em `build/` dentro da raiz do repositório.
+
+Antes da primeira configuração, instale o GDCM no vcpkg (modo clássico, requerido pelo `CMakeLists.txt`):
+
+```powershell
+C:\vcpkg\vcpkg.exe install gdcm:x64-windows
+```
 
 ### Configurar e compilar (primeira vez)
 
