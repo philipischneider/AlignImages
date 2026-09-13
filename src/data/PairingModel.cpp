@@ -20,4 +20,9 @@ const char* ToString(PairStatus status)
         return "unmatched";
     }
 }
+
+std::string MakePairingId(const StackId& fixedStackId, const StackId& movingStackId)
+{
+    return fixedStackId + "__" + movingStackId;
+}
 } // namespace align

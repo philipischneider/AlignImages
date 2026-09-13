@@ -207,30 +207,46 @@ Result SessionSerializer::Save(const SessionModel& session, const std::filesyste
         return result;
     };
 
-    root["stacks"] = nlohmann::json::array({serializeStack(session.stackA), serializeStack(session.stackB)});
-    root["pairing"] = {
-        {"fixed_stack_id", session.pairing.fixedStackId},
-        {"moving_stack_id", session.pairing.movingStackId},
-        {"global_offset", session.pairing.globalOffset},
-        {"fixed_timeline_offset", session.pairing.fixedTimelineOffset},
-        {"moving_timeline_offset", session.pairing.movingTimelineOffset},
-        {"pairs", nlohmann::json::array()}
-    };
-
-    for (const PairRecord& pair : session.pairing.pairs)
+    root["stacks"] = nlohmann::json::array();
+    for (const StackModel& stack : session.stacks)
     {
-        root["pairing"]["pairs"].push_back({
-            {"fixed_index", pair.fixedIndex},
-            {"moving_index", pair.movingIndex},
-            {"valid", pair.valid},
-            {"status", align::ToString(pair.status)}
-        });
+        root["stacks"].push_back(serializeStack(stack));
+    }
+
+    root["active_pairing_id"] = session.activePairingId;
+    root["pairings"] = nlohmann::json::array();
+    for (const PairingModel& pairing : session.pairings)
+    {
+        nlohmann::json pairingJson = {
+            {"id", pairing.id},
+            {"label", pairing.label},
+            {"fixed_stack_id", pairing.fixedStackId},
+            {"moving_stack_id", pairing.movingStackId},
+            {"global_offset", pairing.globalOffset},
+            {"fixed_timeline_offset", pairing.fixedTimelineOffset},
+            {"moving_timeline_offset", pairing.movingTimelineOffset},
+            {"active_fixed_index", pairing.activeFixedIndex},
+            {"active_moving_index", pairing.activeMovingIndex},
+            {"pairs", nlohmann::json::array()}
+        };
+        for (const PairRecord& pair : pairing.pairs)
+        {
+            pairingJson["pairs"].push_back({
+                {"fixed_index", pair.fixedIndex},
+                {"moving_index", pair.movingIndex},
+                {"valid", pair.valid},
+                {"status", align::ToString(pair.status)}
+            });
+        }
+        root["pairings"].push_back(std::move(pairingJson));
     }
 
     root["registrations"] = nlohmann::json::array();
     for (const RegistrationResult& registration : session.registrations)
     {
         root["registrations"].push_back({
+            {"fixed_stack_id", registration.fixedStackId},
+            {"moving_stack_id", registration.movingStackId},
             {"fixed_index", registration.fixedIndex},
             {"moving_index", registration.movingIndex},
             {"transform_type", registration.transformType},
@@ -401,81 +417,139 @@ Result SessionSerializer::Load(const std::filesystem::path& filePath, SessionMod
         loaded.uiPreferences.timelineHeight = root["ui"].value("timeline_height", loaded.uiPreferences.timelineHeight);
     }
 
-    if (root.contains("stacks") && root["stacks"].is_array() && root["stacks"].size() >= 2)
+    auto parseStack = [](const nlohmann::json& node, StackModel& stack)
     {
-        auto parseStack = [](const nlohmann::json& node, StackModel& stack)
+        stack.id = node.value("id", stack.id);
+        stack.name = node.value("name", stack.name);
+        stack.modality = node.value("modality", stack.modality);
+        stack.directory = node.value("directory", stack.directory);
+        stack.isDicom = node.value("is_dicom", stack.isDicom);
+        stack.windowCenter = node.value("window_center", stack.windowCenter);
+        stack.windowWidth = node.value("window_width", stack.windowWidth);
+        stack.defaultWindowCenter = node.value("default_window_center", stack.defaultWindowCenter);
+        stack.defaultWindowWidth = node.value("default_window_width", stack.defaultWindowWidth);
+        stack.rescaleSlope = node.value("rescale_slope", stack.rescaleSlope);
+        stack.rescaleIntercept = node.value("rescale_intercept", stack.rescaleIntercept);
+        stack.slices.clear();
+        if (node.contains("slices"))
         {
-            stack.id = node.value("id", stack.id);
-            stack.name = node.value("name", stack.name);
-            stack.modality = node.value("modality", stack.modality);
-            stack.directory = node.value("directory", stack.directory);
-            stack.isDicom = node.value("is_dicom", stack.isDicom);
-            stack.windowCenter = node.value("window_center", stack.windowCenter);
-            stack.windowWidth = node.value("window_width", stack.windowWidth);
-            stack.defaultWindowCenter = node.value("default_window_center", stack.defaultWindowCenter);
-            stack.defaultWindowWidth = node.value("default_window_width", stack.defaultWindowWidth);
-            stack.rescaleSlope = node.value("rescale_slope", stack.rescaleSlope);
-            stack.rescaleIntercept = node.value("rescale_intercept", stack.rescaleIntercept);
-            stack.slices.clear();
-            if (node.contains("slices"))
+            for (const auto& item : node["slices"])
             {
-                for (const auto& item : node["slices"])
-                {
-                    SliceRecord slice;
-                    slice.stackIndex = item.value("index", -1);
-                    slice.filePath = item.value("file_path", "");
-                    slice.fileName = item.value("file_name", "");
-                    slice.width = item.value("width", 0);
-                    slice.height = item.value("height", 0);
-                    slice.instanceNumber = item.value("instance_number", -1);
-                    slice.sliceLocation = item.value("slice_location", 0.0);
-                    slice.flipHorizontal = item.value("flip_horizontal", false);
-                    slice.flipVertical = item.value("flip_vertical", false);
-                    slice.rotationDegrees = item.value("rotation_degrees", 0);
-                    stack.slices.push_back(slice);
-                }
+                SliceRecord slice;
+                slice.stackIndex = item.value("index", -1);
+                slice.filePath = item.value("file_path", "");
+                slice.fileName = item.value("file_name", "");
+                slice.width = item.value("width", 0);
+                slice.height = item.value("height", 0);
+                slice.instanceNumber = item.value("instance_number", -1);
+                slice.sliceLocation = item.value("slice_location", 0.0);
+                slice.flipHorizontal = item.value("flip_horizontal", false);
+                slice.flipVertical = item.value("flip_vertical", false);
+                slice.rotationDegrees = item.value("rotation_degrees", 0);
+                stack.slices.push_back(slice);
             }
-        };
+        }
+    };
 
-        parseStack(root["stacks"][0], loaded.stackA);
-        parseStack(root["stacks"][1], loaded.stackB);
+    auto parsePairs = [](const nlohmann::json& pairsNode)
+    {
+        std::vector<PairRecord> pairs;
+        for (const auto& item : pairsNode)
+        {
+            PairRecord pair;
+            pair.fixedIndex = item.value("fixed_index", -1);
+            pair.movingIndex = item.value("moving_index", -1);
+            pair.valid = item.value("valid", false);
+            pair.status = ParsePairStatus(item.value("status", "unmatched"));
+            pairs.push_back(pair);
+        }
+        return pairs;
+    };
+
+    loaded.stacks.clear();
+    if (root.contains("stacks") && root["stacks"].is_array())
+    {
+        for (const auto& node : root["stacks"])
+        {
+            StackModel stack;
+            parseStack(node, stack);
+            loaded.stacks.push_back(std::move(stack));
+        }
     }
 
-    if (root.contains("pairing"))
+    loaded.pairings.clear();
+    if (root.contains("pairings") && root["pairings"].is_array())
     {
-        loaded.pairing.fixedStackId = root["pairing"].value("fixed_stack_id", loaded.pairing.fixedStackId);
-        loaded.pairing.movingStackId = root["pairing"].value("moving_stack_id", loaded.pairing.movingStackId);
-        loaded.pairing.globalOffset = root["pairing"].value("global_offset", loaded.pairing.globalOffset);
-        loaded.pairing.fixedTimelineOffset =
-            root["pairing"].value("fixed_timeline_offset", loaded.pairing.fixedTimelineOffset);
-        loaded.pairing.movingTimelineOffset =
-            root["pairing"].value("moving_timeline_offset", loaded.pairing.movingTimelineOffset);
-        if (!root["pairing"].contains("fixed_timeline_offset") && !root["pairing"].contains("moving_timeline_offset"))
+        // Current (N-stack) schema.
+        for (const auto& node : root["pairings"])
         {
-            loaded.pairing.fixedTimelineOffset = 0;
-            loaded.pairing.movingTimelineOffset = -loaded.pairing.globalOffset;
-        }
-        loaded.pairing.pairs.clear();
-        if (root["pairing"].contains("pairs"))
-        {
-            for (const auto& item : root["pairing"]["pairs"])
+            PairingModel pairing;
+            pairing.fixedStackId = node.value("fixed_stack_id", pairing.fixedStackId);
+            pairing.movingStackId = node.value("moving_stack_id", pairing.movingStackId);
+            pairing.id = node.value("id", MakePairingId(pairing.fixedStackId, pairing.movingStackId));
+            pairing.label = node.value("label", pairing.id);
+            pairing.globalOffset = node.value("global_offset", pairing.globalOffset);
+            pairing.fixedTimelineOffset = node.value("fixed_timeline_offset", pairing.fixedTimelineOffset);
+            pairing.movingTimelineOffset = node.value("moving_timeline_offset", pairing.movingTimelineOffset);
+            pairing.activeFixedIndex = node.value("active_fixed_index", pairing.activeFixedIndex);
+            pairing.activeMovingIndex = node.value("active_moving_index", pairing.activeMovingIndex);
+            if (node.contains("pairs"))
             {
-                PairRecord pair;
-                pair.fixedIndex = item.value("fixed_index", -1);
-                pair.movingIndex = item.value("moving_index", -1);
-                pair.valid = item.value("valid", false);
-                pair.status = ParsePairStatus(item.value("status", "unmatched"));
-                loaded.pairing.pairs.push_back(pair);
+                pairing.pairs = parsePairs(node["pairs"]);
             }
+            loaded.pairings.push_back(std::move(pairing));
         }
+        loaded.activePairingId = root.value("active_pairing_id", loaded.pairings.empty() ? std::string{} : loaded.pairings.front().id);
+    }
+    else if (root.contains("pairing"))
+    {
+        // Legacy (2-stack) schema: migrate the single fixed/moving pairing into the new list.
+        const auto& node = root["pairing"];
+        PairingModel pairing;
+        pairing.fixedStackId = node.value("fixed_stack_id", pairing.fixedStackId);
+        pairing.movingStackId = node.value("moving_stack_id", pairing.movingStackId);
+        pairing.id = MakePairingId(pairing.fixedStackId, pairing.movingStackId);
+        pairing.label = pairing.id;
+        pairing.globalOffset = node.value("global_offset", pairing.globalOffset);
+        pairing.fixedTimelineOffset = node.value("fixed_timeline_offset", pairing.fixedTimelineOffset);
+        pairing.movingTimelineOffset = node.value("moving_timeline_offset", pairing.movingTimelineOffset);
+        if (!node.contains("fixed_timeline_offset") && !node.contains("moving_timeline_offset"))
+        {
+            pairing.fixedTimelineOffset = 0;
+            pairing.movingTimelineOffset = -pairing.globalOffset;
+        }
+        pairing.activeFixedIndex = root["project"].value("active_slice_a", 0);
+        pairing.activeMovingIndex = root["project"].value("active_slice_b", 0);
+        if (node.contains("pairs"))
+        {
+            pairing.pairs = parsePairs(node["pairs"]);
+        }
+        loaded.pairings.push_back(pairing);
+        loaded.activePairingId = pairing.id;
+    }
+
+    if (loaded.pairings.empty() && loaded.stacks.size() >= 2)
+    {
+        // Sessions saved without any pairing info at all: default to pairing the first two stacks.
+        PairingModel pairing;
+        pairing.fixedStackId = loaded.stacks[0].id;
+        pairing.movingStackId = loaded.stacks[1].id;
+        pairing.id = MakePairingId(pairing.fixedStackId, pairing.movingStackId);
+        pairing.label = pairing.id;
+        loaded.pairings.push_back(pairing);
+        loaded.activePairingId = pairing.id;
     }
 
     loaded.registrations.clear();
     if (root.contains("registrations"))
     {
+        const std::string fallbackFixedStackId = loaded.pairings.empty() ? std::string{} : loaded.pairings.front().fixedStackId;
+        const std::string fallbackMovingStackId = loaded.pairings.empty() ? std::string{} : loaded.pairings.front().movingStackId;
         for (const auto& item : root["registrations"])
         {
             RegistrationResult registration;
+            registration.fixedStackId = item.value("fixed_stack_id", fallbackFixedStackId);
+            registration.movingStackId = item.value("moving_stack_id", fallbackMovingStackId);
             registration.fixedIndex = item.value("fixed_index", -1);
             registration.movingIndex = item.value("moving_index", -1);
             registration.transformType = item.value("transform_type", "similarity");

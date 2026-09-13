@@ -1,4 +1,4 @@
-#include "timeline/TimelinePanel.h"
+﻿#include "timeline/TimelinePanel.h"
 
 #include "imgui.h"
 
@@ -38,9 +38,9 @@ ImVec4 ColorForPairStatus(PairStatus status)
 
 bool TryResolveStackAFromStackB(const AppContext& context, int stackBIndex, int& resolvedAIndex)
 {
-    for (int i = 0; i < static_cast<int>(context.session.pairing.pairs.size()); ++i)
+    for (int i = 0; i < static_cast<int>(GetActivePairing(context.session).pairs.size()); ++i)
     {
-        const PairRecord& pair = context.session.pairing.pairs[i];
+        const PairRecord& pair = GetActivePairing(context.session).pairs[i];
         if (pair.valid && pair.movingIndex == stackBIndex)
         {
             resolvedAIndex = pair.fixedIndex;
@@ -53,7 +53,7 @@ bool TryResolveStackAFromStackB(const AppContext& context, int stackBIndex, int&
 
 PairStatus ResolveStackBStatus(const AppContext& context, int stackBIndex)
 {
-    for (const PairRecord& pair : context.session.pairing.pairs)
+    for (const PairRecord& pair : GetActivePairing(context.session).pairs)
     {
         if (pair.valid && pair.movingIndex == stackBIndex)
         {
@@ -73,15 +73,15 @@ enum class LandmarkMarkerKind
 
 LandmarkMarkerKind LandmarkMarkerForStackA(const AppContext& context, int stackAIndex)
 {
-    if (stackAIndex < 0 || stackAIndex >= static_cast<int>(context.session.pairing.pairs.size()))
+    if (stackAIndex < 0 || stackAIndex >= static_cast<int>(GetActivePairing(context.session).pairs.size()))
         return LandmarkMarkerKind::None;
 
-    const PairRecord& pair = context.session.pairing.pairs[stackAIndex];
+    const PairRecord& pair = GetActivePairing(context.session).pairs[stackAIndex];
     if (!pair.valid)
         return LandmarkMarkerKind::None;
 
     const RegistrationResult* reg =
-        FindRegistrationResult(context.session.registrations, pair.fixedIndex, pair.movingIndex);
+        FindRegistrationResult(context.session.registrations, GetActivePairing(context.session).fixedStackId, GetActivePairing(context.session).movingStackId, pair.fixedIndex, pair.movingIndex);
     if (reg == nullptr || !reg->isManual)
         return LandmarkMarkerKind::None;
 
@@ -90,13 +90,13 @@ LandmarkMarkerKind LandmarkMarkerForStackA(const AppContext& context, int stackA
 
 LandmarkMarkerKind LandmarkMarkerForStackB(const AppContext& context, int stackBIndex)
 {
-    for (const PairRecord& pair : context.session.pairing.pairs)
+    for (const PairRecord& pair : GetActivePairing(context.session).pairs)
     {
         if (!pair.valid || pair.movingIndex != stackBIndex)
             continue;
 
         const RegistrationResult* reg =
-            FindRegistrationResult(context.session.registrations, pair.fixedIndex, pair.movingIndex);
+            FindRegistrationResult(context.session.registrations, GetActivePairing(context.session).fixedStackId, GetActivePairing(context.session).movingStackId, pair.fixedIndex, pair.movingIndex);
         if (reg == nullptr || !reg->isManual)
             continue;
 
@@ -121,22 +121,22 @@ void TimelinePanel::Draw(AppContext& context, float height)
                           "  violet = transform propagated (no landmark points)");
     }
     ImGui::TextWrapped("Clique e arraste o bloco colorido de cada stack (como um clipe de video) para deslocar a correspondencia.");
-    ImGui::Text("Derived Offset (B -> A): %d", context.session.pairing.globalOffset);
+    ImGui::Text("Derived Offset (B -> A): %d", GetActivePairing(context.session).globalOffset);
     ImGui::Separator();
 
-    const int normalizedBase = -(std::min)(0, (std::min)(context.session.pairing.fixedTimelineOffset,
-                                                          context.session.pairing.movingTimelineOffset));
-    const int normOffsetA = context.session.pairing.fixedTimelineOffset  + normalizedBase;
-    const int normOffsetB = context.session.pairing.movingTimelineOffset + normalizedBase;
+    const int normalizedBase = -(std::min)(0, (std::min)(GetActivePairing(context.session).fixedTimelineOffset,
+                                                          GetActivePairing(context.session).movingTimelineOffset));
+    const int normOffsetA = GetActivePairing(context.session).fixedTimelineOffset  + normalizedBase;
+    const int normOffsetB = GetActivePairing(context.session).movingTimelineOffset + normalizedBase;
 
-    // Both stacks share a single scrollable area — no more vertical scrolling to find Stack B
+    // Both stacks share a single scrollable area â€” no more vertical scrolling to find Stack B
     ImGui::BeginChild("Timelines", ImVec2(0.0f, 0.0f), false, ImGuiWindowFlags_HorizontalScrollbar);
 
     const float widthA = DrawStackTimeline(context,
                                            "Stack A",
-                                           context.session.stackA,
-                                           context.session.projectPreferences.activeSliceA,
-                                           context.session.pairing.fixedTimelineOffset,
+                                           GetActiveFixedStack(context.session),
+                                           GetActivePairing(context.session).activeFixedIndex,
+                                           GetActivePairing(context.session).fixedTimelineOffset,
                                            normOffsetA);
 
     ImGui::Spacing();
@@ -145,9 +145,9 @@ void TimelinePanel::Draw(AppContext& context, float height)
 
     const float widthB = DrawStackTimeline(context,
                                            "Stack B",
-                                           context.session.stackB,
-                                           context.session.projectPreferences.activeSliceB,
-                                           context.session.pairing.movingTimelineOffset,
+                                           GetActiveMovingStack(context.session),
+                                           GetActivePairing(context.session).activeMovingIndex,
+                                           GetActivePairing(context.session).movingTimelineOffset,
                                            normOffsetB);
 
     // One Dummy sized to the wider row ensures the scrollbar covers both stacks
@@ -197,7 +197,7 @@ float TimelinePanel::DrawStackTimeline(AppContext& context,
         if (nextOffset != timelineOffset)
         {
             timelineOffset = nextOffset;
-            RebuildPairs(context.session);
+            RebuildPairs(context.session, GetActivePairing(context.session));
         }
     }
     if (isDraggingThis && ImGui::IsMouseReleased(ImGuiMouseButton_Left))
@@ -206,7 +206,7 @@ float TimelinePanel::DrawStackTimeline(AppContext& context,
     }
 
     ImDrawList* drawList = ImGui::GetWindowDrawList();
-    const bool isStackA = (&stack == &context.session.stackA);
+    const bool isStackA = (&stack == &GetActiveFixedStack(context.session));
     const ImU32 clipColor = isStackA ? IM_COL32(40, 78, 122, 255) : IM_COL32(140, 84, 28, 255);
     const ImU32 clipLabelBandColor = isStackA ? IM_COL32(30, 60, 96, 255) : IM_COL32(110, 64, 20, 255);
 
@@ -235,11 +235,11 @@ float TimelinePanel::DrawStackTimeline(AppContext& context,
                                          trackOrigin.y + kClipLabelBandHeight + 4.0f));
         const bool isActive = (i == activeIndex);
         PairStatus status = PairStatus::Unmatched;
-        if (&stack == &context.session.stackA)
+        if (&stack == &GetActiveFixedStack(context.session))
         {
-            if (i < static_cast<int>(context.session.pairing.pairs.size()))
+            if (i < static_cast<int>(GetActivePairing(context.session).pairs.size()))
             {
-                status = context.session.pairing.pairs[i].status;
+                status = GetActivePairing(context.session).pairs[i].status;
             }
         }
         else
@@ -280,26 +280,26 @@ float TimelinePanel::DrawStackTimeline(AppContext& context,
             activeIndex = i;
             context.selectedHistoryIndex = -1;
             context.selectedOperationId = 0;
-            if (&stack == &context.session.stackA && i < static_cast<int>(context.session.pairing.pairs.size()))
+            if (&stack == &GetActiveFixedStack(context.session) && i < static_cast<int>(GetActivePairing(context.session).pairs.size()))
             {
-                const PairRecord& pair = context.session.pairing.pairs[i];
+                const PairRecord& pair = GetActivePairing(context.session).pairs[i];
                 if (pair.valid)
                 {
-                    context.session.projectPreferences.activeSliceB = pair.movingIndex;
+                    GetActivePairing(context.session).activeMovingIndex = pair.movingIndex;
                 }
             }
-            else if (&stack == &context.session.stackB)
+            else if (&stack == &GetActiveMovingStack(context.session))
             {
                 int resolvedAIndex = -1;
                 if (TryResolveStackAFromStackB(context, i, resolvedAIndex))
                 {
-                    context.session.projectPreferences.activeSliceA = resolvedAIndex;
+                    GetActivePairing(context.session).activeFixedIndex = resolvedAIndex;
                 }
             }
         }
 
         ImGui::Text("%03d", i);
-        const LandmarkMarkerKind markerKind = (&stack == &context.session.stackA)
+        const LandmarkMarkerKind markerKind = (&stack == &GetActiveFixedStack(context.session))
                                                   ? LandmarkMarkerForStackA(context, i)
                                                   : LandmarkMarkerForStackB(context, i);
         if (markerKind != LandmarkMarkerKind::None)
@@ -307,8 +307,8 @@ float TimelinePanel::DrawStackTimeline(AppContext& context,
             const ImVec2 markerMin = ImGui::GetItemRectMin();
             const ImVec2 markerMax = ImGui::GetItemRectMax();
             const ImU32 color = (markerKind == LandmarkMarkerKind::Real)
-                                    ? IM_COL32(255, 182, 66, 255)   // amber  — real landmarks
-                                    : IM_COL32(160, 100, 220, 255); // violet — propagated transform
+                                    ? IM_COL32(255, 182, 66, 255)   // amber  â€” real landmarks
+                                    : IM_COL32(160, 100, 220, 255); // violet â€” propagated transform
             drawList->AddRectFilled(ImVec2(markerMin.x + 8.0f, markerMax.y + 2.0f),
                                     ImVec2(markerMin.x + 20.0f, markerMax.y + 10.0f),
                                     color,

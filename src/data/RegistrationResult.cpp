@@ -17,12 +17,15 @@ void AppendHistorySnapshot(RegistrationResult& registration, const std::string& 
 }
 
 RegistrationResult* FindRegistrationResult(std::vector<RegistrationResult>& registrations,
+                                           const StackId& fixedStackId,
+                                           const StackId& movingStackId,
                                            SliceIndex fixedIndex,
                                            SliceIndex movingIndex)
 {
     for (RegistrationResult& registration : registrations)
     {
-        if (registration.fixedIndex == fixedIndex && registration.movingIndex == movingIndex)
+        if (registration.fixedIndex == fixedIndex && registration.movingIndex == movingIndex &&
+            registration.fixedStackId == fixedStackId && registration.movingStackId == movingStackId)
         {
             return &registration;
         }
@@ -32,12 +35,15 @@ RegistrationResult* FindRegistrationResult(std::vector<RegistrationResult>& regi
 }
 
 const RegistrationResult* FindRegistrationResult(const std::vector<RegistrationResult>& registrations,
+                                                 const StackId& fixedStackId,
+                                                 const StackId& movingStackId,
                                                  SliceIndex fixedIndex,
                                                  SliceIndex movingIndex)
 {
     for (const RegistrationResult& registration : registrations)
     {
-        if (registration.fixedIndex == fixedIndex && registration.movingIndex == movingIndex)
+        if (registration.fixedIndex == fixedIndex && registration.movingIndex == movingIndex &&
+            registration.fixedStackId == fixedStackId && registration.movingStackId == movingStackId)
         {
             return &registration;
         }

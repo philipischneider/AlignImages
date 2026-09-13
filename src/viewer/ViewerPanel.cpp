@@ -1,4 +1,4 @@
-#include "viewer/ViewerPanel.h"
+﻿#include "viewer/ViewerPanel.h"
 
 #include "io/DicomLoader.h"
 #include "registration/LandmarkRegistration.h"
@@ -72,13 +72,13 @@ void DrawWindowLevelControls(const char* idSuffix, const char* label, StackModel
 
 const PairRecord* GetActivePair(const AppContext& context)
 {
-    const int activeSliceA = context.session.projectPreferences.activeSliceA;
-    if (activeSliceA < 0 || activeSliceA >= static_cast<int>(context.session.pairing.pairs.size()))
+    const int activeSliceA = GetActivePairing(context.session).activeFixedIndex;
+    if (activeSliceA < 0 || activeSliceA >= static_cast<int>(GetActivePairing(context.session).pairs.size()))
     {
         return nullptr;
     }
 
-    const PairRecord& pair = context.session.pairing.pairs[activeSliceA];
+    const PairRecord& pair = GetActivePairing(context.session).pairs[activeSliceA];
     return pair.valid ? &pair : nullptr;
 }
 
@@ -90,7 +90,7 @@ const RegistrationResult* FindCurrentRegistration(const AppContext& context)
         return nullptr;
     }
 
-    return FindRegistrationResult(context.session.registrations, pair->fixedIndex, pair->movingIndex);
+    return FindRegistrationResult(context.session.registrations, GetActivePairing(context.session).fixedStackId, GetActivePairing(context.session).movingStackId, pair->fixedIndex, pair->movingIndex);
 }
 
 const RegistrationResult* ResolvePreviewRegistration(const AppContext& context,
@@ -223,13 +223,15 @@ RegistrationResult* GetOrCreateCurrentRegistration(AppContext& context)
     }
 
     RegistrationResult* existing =
-        FindRegistrationResult(context.session.registrations, pair->fixedIndex, pair->movingIndex);
+        FindRegistrationResult(context.session.registrations, GetActivePairing(context.session).fixedStackId, GetActivePairing(context.session).movingStackId, pair->fixedIndex, pair->movingIndex);
     if (existing != nullptr)
     {
         return existing;
     }
 
     RegistrationResult created;
+    created.fixedStackId = GetActivePairing(context.session).fixedStackId;
+    created.movingStackId = GetActivePairing(context.session).movingStackId;
     created.fixedIndex = pair->fixedIndex;
     created.movingIndex = pair->movingIndex;
     context.session.registrations.push_back(created);
@@ -455,16 +457,16 @@ void ViewerPanel::Draw(AppContext& context, const ImVec2& size)
 
     if (m_content == ViewerContent::StackA)
     {
-        DrawWindowLevelControls("wl_a", nullptr, context.session.stackA);
+        DrawWindowLevelControls("wl_a", nullptr, GetActiveFixedStack(context.session));
     }
     else if (m_content == ViewerContent::StackB)
     {
-        DrawWindowLevelControls("wl_b", nullptr, context.session.stackB);
+        DrawWindowLevelControls("wl_b", nullptr, GetActiveMovingStack(context.session));
     }
     else
     {
-        DrawWindowLevelControls("wl_pa", "Stack A window:", context.session.stackA);
-        DrawWindowLevelControls("wl_pb", "Stack B window:", context.session.stackB);
+        DrawWindowLevelControls("wl_pa", "Stack A window:", GetActiveFixedStack(context.session));
+        DrawWindowLevelControls("wl_pb", "Stack B window:", GetActiveMovingStack(context.session));
     }
 
     ImGui::TextUnformatted("Mouse: wheel zoom, middle-button drag pan.");
@@ -506,8 +508,8 @@ Result ViewerPanel::LoadDisplayImage(AppContext& context, const StackModel& stac
 void ViewerPanel::RefreshTexture(AppContext& context)
 {
     cv::Mat image;
-    const SliceRecord* sliceA = GetActiveSlice(context.session.stackA, context.session.projectPreferences.activeSliceA);
-    const SliceRecord* sliceB = GetActiveSlice(context.session.stackB, context.session.projectPreferences.activeSliceB);
+    const SliceRecord* sliceA = GetActiveSlice(GetActiveFixedStack(context.session), GetActivePairing(context.session).activeFixedIndex);
+    const SliceRecord* sliceB = GetActiveSlice(GetActiveMovingStack(context.session), GetActivePairing(context.session).activeMovingIndex);
     const RegistrationResult* currentRegistration = FindCurrentRegistration(context);
     RegistrationResult previewHistorySelection;
     const RegistrationResult* registration =
@@ -533,8 +535,8 @@ void ViewerPanel::RefreshTexture(AppContext& context)
         }
 
         if (m_loadedFilePath == slice->filePath &&
-            m_loadedWindowCenterA == context.session.stackA.windowCenter &&
-            m_loadedWindowWidthA == context.session.stackA.windowWidth &&
+            m_loadedWindowCenterA == GetActiveFixedStack(context.session).windowCenter &&
+            m_loadedWindowWidthA == GetActiveFixedStack(context.session).windowWidth &&
             m_loadedFlipHA == slice->flipHorizontal && m_loadedFlipVA == slice->flipVertical &&
             m_loadedRotationA == slice->rotationDegrees)
         {
@@ -542,7 +544,7 @@ void ViewerPanel::RefreshTexture(AppContext& context)
             return;
         }
 
-        Result result = LoadDisplayImage(context, context.session.stackA, *slice, image);
+        Result result = LoadDisplayImage(context, GetActiveFixedStack(context.session), *slice, image);
         if (!result.ok)
         {
             m_texture.Reset();
@@ -554,8 +556,8 @@ void ViewerPanel::RefreshTexture(AppContext& context)
         m_texture.Upload(image);
         m_loadedFilePath = slice->filePath;
         m_loadedUsedAlignment = false;
-        m_loadedWindowCenterA = context.session.stackA.windowCenter;
-        m_loadedWindowWidthA = context.session.stackA.windowWidth;
+        m_loadedWindowCenterA = GetActiveFixedStack(context.session).windowCenter;
+        m_loadedWindowWidthA = GetActiveFixedStack(context.session).windowWidth;
         m_loadedFlipHA = slice->flipHorizontal;
         m_loadedFlipVA = slice->flipVertical;
         m_loadedRotationA = slice->rotationDegrees;
@@ -576,8 +578,8 @@ void ViewerPanel::RefreshTexture(AppContext& context)
         if (m_loadedFilePath == slice->filePath &&
             m_loadedTx == currentTx && m_loadedTy == currentTy && m_loadedTheta == currentTheta &&
             m_loadedScale == currentScale &&
-            m_loadedWindowCenterB == context.session.stackB.windowCenter &&
-            m_loadedWindowWidthB == context.session.stackB.windowWidth &&
+            m_loadedWindowCenterB == GetActiveMovingStack(context.session).windowCenter &&
+            m_loadedWindowWidthB == GetActiveMovingStack(context.session).windowWidth &&
             m_loadedFlipHB == slice->flipHorizontal && m_loadedFlipVB == slice->flipVertical &&
             m_loadedRotationB == slice->rotationDegrees)
         {
@@ -585,7 +587,7 @@ void ViewerPanel::RefreshTexture(AppContext& context)
             return;
         }
 
-        Result result = LoadDisplayImage(context, context.session.stackB, *slice, image);
+        Result result = LoadDisplayImage(context, GetActiveMovingStack(context.session), *slice, image);
         if (!result.ok)
         {
             m_texture.Reset();
@@ -601,8 +603,8 @@ void ViewerPanel::RefreshTexture(AppContext& context)
         m_loadedTy = currentTy;
         m_loadedTheta = currentTheta;
         m_loadedScale = currentScale;
-        m_loadedWindowCenterB = context.session.stackB.windowCenter;
-        m_loadedWindowWidthB = context.session.stackB.windowWidth;
+        m_loadedWindowCenterB = GetActiveMovingStack(context.session).windowCenter;
+        m_loadedWindowWidthB = GetActiveMovingStack(context.session).windowWidth;
         m_loadedFlipHB = slice->flipHorizontal;
         m_loadedFlipVB = slice->flipVertical;
         m_loadedRotationB = slice->rotationDegrees;
@@ -629,8 +631,8 @@ void ViewerPanel::RefreshTexture(AppContext& context)
         m_loadedUsedAlignment == useAlignmentPreview && m_loadedRegistrationScore == registrationScore &&
         m_loadedTx == currentTx && m_loadedTy == currentTy && m_loadedTheta == currentTheta &&
         m_loadedScale == currentScale &&
-        m_loadedWindowCenterA == context.session.stackA.windowCenter && m_loadedWindowWidthA == context.session.stackA.windowWidth &&
-        m_loadedWindowCenterB == context.session.stackB.windowCenter && m_loadedWindowWidthB == context.session.stackB.windowWidth &&
+        m_loadedWindowCenterA == GetActiveFixedStack(context.session).windowCenter && m_loadedWindowWidthA == GetActiveFixedStack(context.session).windowWidth &&
+        m_loadedWindowCenterB == GetActiveMovingStack(context.session).windowCenter && m_loadedWindowWidthB == GetActiveMovingStack(context.session).windowWidth &&
         m_loadedFlipHA == sliceA->flipHorizontal && m_loadedFlipVA == sliceA->flipVertical && m_loadedRotationA == sliceA->rotationDegrees &&
         m_loadedFlipHB == sliceB->flipHorizontal && m_loadedFlipVB == sliceB->flipVertical && m_loadedRotationB == sliceB->rotationDegrees)
     {
@@ -640,8 +642,8 @@ void ViewerPanel::RefreshTexture(AppContext& context)
 
     cv::Mat imageA;
     cv::Mat imageB;
-    Result loadA = LoadDisplayImage(context, context.session.stackA, *sliceA, imageA);
-    Result loadB = LoadDisplayImage(context, context.session.stackB, *sliceB, imageB);
+    Result loadA = LoadDisplayImage(context, GetActiveFixedStack(context.session), *sliceA, imageA);
+    Result loadB = LoadDisplayImage(context, GetActiveMovingStack(context.session), *sliceB, imageB);
     if (!loadA.ok || !loadB.ok)
     {
         m_texture.Reset();
@@ -677,10 +679,10 @@ void ViewerPanel::RefreshTexture(AppContext& context)
     m_loadedTy = currentTy;
     m_loadedTheta = currentTheta;
     m_loadedScale = currentScale;
-    m_loadedWindowCenterA = context.session.stackA.windowCenter;
-    m_loadedWindowWidthA = context.session.stackA.windowWidth;
-    m_loadedWindowCenterB = context.session.stackB.windowCenter;
-    m_loadedWindowWidthB = context.session.stackB.windowWidth;
+    m_loadedWindowCenterA = GetActiveFixedStack(context.session).windowCenter;
+    m_loadedWindowWidthA = GetActiveFixedStack(context.session).windowWidth;
+    m_loadedWindowCenterB = GetActiveMovingStack(context.session).windowCenter;
+    m_loadedWindowWidthB = GetActiveMovingStack(context.session).windowWidth;
     m_loadedFlipHA = sliceA->flipHorizontal;
     m_loadedFlipVA = sliceA->flipVertical;
     m_loadedRotationA = sliceA->rotationDegrees;

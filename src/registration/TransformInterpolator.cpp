@@ -76,7 +76,9 @@ Transform2D InvertAffine(const Transform2D& fwd)
 } // namespace
 
 int ApplyTransformInterpolation(const std::vector<PairRecord>& pairs,
-                                std::vector<RegistrationResult>& registrations)
+                                std::vector<RegistrationResult>& registrations,
+                                const StackId& fixedStackId,
+                                const StackId& movingStackId)
 {
     struct Anchor
     {
@@ -96,7 +98,7 @@ int ApplyTransformInterpolation(const std::vector<PairRecord>& pairs,
             continue;
 
         const RegistrationResult* reg =
-            FindRegistrationResult(registrations, pair.fixedIndex, pair.movingIndex);
+            FindRegistrationResult(registrations, fixedStackId, movingStackId, pair.fixedIndex, pair.movingIndex);
         if (reg == nullptr || !IsAnchorRegistration(*reg))
             continue;
 
@@ -127,7 +129,7 @@ int ApplyTransformInterpolation(const std::vector<PairRecord>& pairs,
                 continue;
 
             RegistrationResult* existing =
-                FindRegistrationResult(registrations, pair.fixedIndex, pair.movingIndex);
+                FindRegistrationResult(registrations, fixedStackId, movingStackId, pair.fixedIndex, pair.movingIndex);
 
             // Protect only slices with explicit user-placed landmarks.
             if (existing != nullptr && existing->isManual && !existing->landmarks.empty() && !existing->isInterpolated)
@@ -143,6 +145,8 @@ int ApplyTransformInterpolation(const std::vector<PairRecord>& pairs,
             const Transform2D inv = InvertAffine(fwd);
 
             RegistrationResult interp;
+            interp.fixedStackId  = fixedStackId;
+            interp.movingStackId = movingStackId;
             interp.fixedIndex    = pair.fixedIndex;
             interp.movingIndex   = pair.movingIndex;
             interp.forward       = fwd;

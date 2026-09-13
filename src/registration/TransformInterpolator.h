@@ -12,5 +12,7 @@ namespace align
 // Skips intermediate pairs that already have a real (non-interpolated) anchor.
 // Returns the number of results created or overwritten.
 int ApplyTransformInterpolation(const std::vector<PairRecord>& pairs,
-                                std::vector<RegistrationResult>& registrations);
+                                std::vector<RegistrationResult>& registrations,
+                                const StackId& fixedStackId,
+                                const StackId& movingStackId);
 } // namespace align

@@ -103,8 +103,6 @@ struct ProjectPreferences
     std::string transformType = "similarity";
     int maxIterations = 40;
     int coarseLevels = 3;
-    int activeSliceA = 0;
-    int activeSliceB = 0;
     bool useAlignmentPreview = true;
     bool useSigmaRestrictedPriorRefinement = true;
     float sigmaMultiplier = 1.5f;
@@ -116,9 +114,9 @@ struct SessionModel
     std::string projectName = "untitled_session";
     std::string version = "0.1.0";
     WorkflowPhase workflowPhase = WorkflowPhase::Setup;
-    StackModel stackA;
-    StackModel stackB;
-    PairingModel pairing;
+    std::vector<StackModel> stacks;
+    std::vector<PairingModel> pairings;
+    std::string activePairingId;
     std::vector<RegistrationResult> registrations;
     std::vector<AlignmentOperation> operations;
     int nextOperationId = 1;
@@ -128,5 +126,16 @@ struct SessionModel
 };
 
 SessionModel CreateDefaultSession();
-void RebuildPairs(SessionModel& session);
+void RebuildPairs(SessionModel& session, PairingModel& pairing);
+
+// Resolution helpers used pervasively by the UI layer to reach "the fixed/moving stack of
+// whichever pairing is currently focused" instead of two hardcoded named stacks.
+StackModel* FindStack(SessionModel& session, const StackId& id);
+const StackModel* FindStack(const SessionModel& session, const StackId& id);
+PairingModel& GetActivePairing(SessionModel& session);
+const PairingModel& GetActivePairing(const SessionModel& session);
+StackModel& GetActiveFixedStack(SessionModel& session);
+const StackModel& GetActiveFixedStack(const SessionModel& session);
+StackModel& GetActiveMovingStack(SessionModel& session);
+const StackModel& GetActiveMovingStack(const SessionModel& session);
 } // namespace align

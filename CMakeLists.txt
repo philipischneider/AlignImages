@@ -32,6 +32,7 @@ set(ALIGN_IMAGES_SOURCES
     src/io/ImageLoader.cpp
     src/io/DicomLoader.cpp
     src/io/DicomPixelCache.cpp
+    src/io/DicomSeriesStitcher.cpp
     src/io/SessionSerializer.cpp
     src/export/ExportController.cpp
     src/registration/ConvergenceAnalyzer.cpp

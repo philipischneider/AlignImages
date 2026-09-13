@@ -46,6 +46,8 @@ struct RegistrationSnapshot
 
 struct RegistrationResult
 {
+    StackId fixedStackId;
+    StackId movingStackId;
     SliceIndex fixedIndex = -1;
     SliceIndex movingIndex = -1;
     Transform2D forward;
@@ -89,9 +91,13 @@ struct RegistrationResult
 };
 
 RegistrationResult* FindRegistrationResult(std::vector<RegistrationResult>& registrations,
+                                           const StackId& fixedStackId,
+                                           const StackId& movingStackId,
                                            SliceIndex fixedIndex,
                                            SliceIndex movingIndex);
 const RegistrationResult* FindRegistrationResult(const std::vector<RegistrationResult>& registrations,
+                                                 const StackId& fixedStackId,
+                                                 const StackId& movingStackId,
                                                  SliceIndex fixedIndex,
                                                  SliceIndex movingIndex);
 void AppendHistorySnapshot(RegistrationResult& registration, const std::string& label);

@@ -33,7 +33,41 @@ bool TryReadAttribute(const gdcm::DataSet& dataSet, T& outValue)
     outValue = attribute.GetValue();
     return true;
 }
+
+template <uint16_t Group, uint16_t Element, size_t N>
+bool TryReadAttributeArray(const gdcm::DataSet& dataSet, std::array<double, N>& outValues)
+{
+    if (!dataSet.FindDataElement(gdcm::Tag(Group, Element)))
+    {
+        return false;
+    }
+
+    gdcm::Attribute<Group, Element> attribute;
+    attribute.SetFromDataSet(dataSet);
+    if (attribute.GetNumberOfValues() < N)
+    {
+        return false;
+    }
+
+    for (size_t i = 0; i < N; ++i)
+    {
+        outValues[i] = attribute.GetValue(static_cast<unsigned int>(i));
+    }
+    return true;
+}
 } // namespace
+
+double ComputeProjectedPosition(const DicomMetadata& metadata)
+{
+    const std::array<double, 6>& o = metadata.imageOrientationPatient;
+    // Row direction cosines: o[0..2]; column direction cosines: o[3..5].
+    const double normalX = o[1] * o[5] - o[2] * o[4];
+    const double normalY = o[2] * o[3] - o[0] * o[5];
+    const double normalZ = o[0] * o[4] - o[1] * o[3];
+
+    const std::array<double, 3>& p = metadata.imagePositionPatient;
+    return normalX * p[0] + normalY * p[1] + normalZ * p[2];
+}
 
 Result DicomLoader::ReadHeaderMetadata(const std::filesystem::path& filePath, DicomMetadata& metadata) const
 {
@@ -92,6 +126,16 @@ Result DicomLoader::ReadHeaderMetadata(const std::filesystem::path& filePath, Di
         metadata.windowCenter = windowCenter;
         metadata.windowWidth = windowWidth;
         metadata.hasWindowTag = true;
+    }
+
+    const bool hasPosition = TryReadAttributeArray<0x0020, 0x0032>(dataSet, metadata.imagePositionPatient);
+    const bool hasOrientation = TryReadAttributeArray<0x0020, 0x0037>(dataSet, metadata.imageOrientationPatient);
+    metadata.hasPositionTags = hasPosition && hasOrientation;
+
+    std::string patientPosition;
+    if (TryReadAttribute<0x0018, 0x5100>(dataSet, patientPosition))
+    {
+        metadata.patientPosition = patientPosition;
     }
 
     return Result{};

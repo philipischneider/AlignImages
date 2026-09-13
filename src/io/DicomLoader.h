@@ -2,6 +2,7 @@
 
 #include "core/Result.h"
 
+#include <array>
 #include <filesystem>
 
 namespace cv
@@ -23,7 +24,20 @@ struct DicomMetadata
     double windowCenter = 0.0;
     double windowWidth = 0.0;
     bool hasWindowTag = false;
+
+    // Raw geometry tags, used to spatially order and reconcile the orientation of multiple
+    // DICOM series that together cover a body region too large for a single acquisition
+    // (e.g. the Visible Human Project's 3-part "Frozen" CT).
+    std::array<double, 3> imagePositionPatient{0.0, 0.0, 0.0};   // (0020,0032)
+    std::array<double, 6> imageOrientationPatient{1.0, 0.0, 0.0, 0.0, 1.0, 0.0}; // (0020,0037): row cosines, col cosines
+    std::string patientPosition; // (0018,5100), e.g. "HFS", "FFS"
+    bool hasPositionTags = false;
 };
+
+// Projects a slice's ImagePositionPatient onto its image-plane normal (cross of the row/col
+// direction cosines). Slices from different series covering the same body region can be sorted
+// globally by this single scalar, even when their own InstanceNumber sequences don't align.
+double ComputeProjectedPosition(const DicomMetadata& metadata);
 
 class DicomLoader
 {

@@ -2,6 +2,7 @@
 
 #include "app/AppContext.h"
 #include "export/ExportController.h"
+#include "io/DicomSeriesStitcher.h"
 #include "io/DirectoryScanner.h"
 #include "io/ImageLoader.h"
 #include "io/SessionSerializer.h"
@@ -17,6 +18,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <unordered_map>
 
 struct GLFWwindow;
 
@@ -128,6 +130,8 @@ private:
     void ProcessAsyncTasks(AppContext& context);
     void DrawStackLoader(AppContext& context, StackModel& stack);
     void LoadStack(AppContext& context, StackModel& stack);
+    void DrawDicomStitchSection(AppContext& context);
+    void StitchAndLoadStack(AppContext& context);
     void RunCurrentAlignment(AppContext& context);
     void RunBatchAlignment(AppContext& context);
     void CancelBatchAlignment(AppContext& context);
@@ -142,11 +146,17 @@ private:
     void PropagateManualLandmarksToAll(AppContext& context);
     void PropagateManualLandmarksToInterval(AppContext& context, int fromPairIdx, int toPairIdx);
     void RunTransformInterpolation(AppContext& context);
+    int CountInterpolationOverwrites(const AppContext& context) const;
     void ExportAnimatedPreview(AppContext& context);
     void CancelAnimatedExport();
     void DrawImageOrientationSection(AppContext& context);
     void DrawStackOrientationControls(const char* idLabel, const char* stackLabel, StackModel& stack, int activeIndex,
                                       int& rangeStart, int& rangeEnd);
+    void DrawStacksAndPairingsSection(AppContext& context);
+    void AddNewStack(AppContext& context);
+    void RemoveStack(AppContext& context, const StackId& stackId);
+    void CreatePairing(AppContext& context, const StackId& fixedStackId, const StackId& movingStackId);
+    void RemovePairing(AppContext& context, const std::string& pairingId);
     void DrawLandmarkEditor(AppContext& context);
     void DrawOperationStack(AppContext& context);
     void DrawMetricsGraph(AppContext& context);
@@ -162,6 +172,7 @@ private:
     TimelinePanel m_timelinePanel;
     SessionSerializer m_serializer;
     DirectoryScanner m_directoryScanner;
+    DicomSeriesStitcher m_dicomSeriesStitcher;
     ImageLoader m_imageLoader;
     ConvergenceAnalyzer m_convergenceAnalyzer;
     RegistrationEngine m_registrationEngine;
@@ -184,9 +195,17 @@ private:
     std::string m_backgroundStatus;
     std::string m_lastMessage;
 
-    int m_orientationRangeStartA = 0;
-    int m_orientationRangeEndA = 0;
-    int m_orientationRangeStartB = 0;
-    int m_orientationRangeEndB = 0;
+    struct OrientationRange
+    {
+        int start = 0;
+        int end = 0;
+    };
+    std::unordered_map<StackId, OrientationRange> m_orientationRanges;
+    int m_nextNewStackId = 1;
+    std::string m_newPairingFixedStackId;
+    std::string m_newPairingMovingStackId;
+    std::vector<std::string> m_stitchDirectories;
+    std::string m_stitchStackName = "Stitched CT";
+    bool m_pendingInterpolationConfirm = false;
 };
 } // namespace align
