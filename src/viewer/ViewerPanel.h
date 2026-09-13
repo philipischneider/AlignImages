@@ -7,6 +7,7 @@
 #include <string>
 
 struct ImVec2;
+struct ImDrawList;
 
 namespace align
 {
@@ -15,6 +16,16 @@ enum class ViewerContent
     StackA,
     StackB,
     Preview
+};
+
+// A resolved zoom/pan target for the current frame: either this viewer's own private state, or
+// the AppContext's shared state when Sync Viewports is enabled -- so all three viewers zoom/pan
+// together.
+struct ZoomPanState
+{
+    float& zoom;
+    float& panX;
+    float& panY;
 };
 
 class ViewerPanel
@@ -27,7 +38,10 @@ public:
 private:
     void RefreshTexture(AppContext& context);
     void DrawImageCanvas(AppContext& context, const ImVec2& canvasSize);
-    void ResetView();
+    void DrawPreviewModeControls(AppContext& context);
+    void DrawTransposeGizmo(AppContext& context, ImDrawList* drawList, const ImVec2& imageMin, const ImVec2& imageMax, bool canvasHovered);
+    void ResetView(AppContext& context);
+    ZoomPanState GetZoomPanState(AppContext& context);
     Result LoadDisplayImage(AppContext& context, const StackModel& stack, const SliceRecord& slice, cv::Mat& outImage);
 
     std::string m_title;

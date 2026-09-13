@@ -252,6 +252,10 @@ Result SessionSerializer::Save(const SessionModel& session, const std::filesyste
             {"transform_type", registration.transformType},
             {"forward_matrix_3x3", registration.forward.matrix},
             {"inverse_matrix_3x3", registration.inverse.matrix},
+            {"base_forward_matrix_3x3", registration.baseForward.matrix},
+            {"base_inverse_matrix_3x3", registration.baseInverse.matrix},
+            {"manual_adjustment_matrix_3x3", registration.manualAdjustment.matrix},
+            {"has_manual_adjustment", registration.hasManualAdjustment},
             {"score", registration.score},
             {"manual_rms_error", registration.manualRmsError},
             {"converged", registration.converged},
@@ -633,6 +637,36 @@ Result SessionSerializer::Load(const std::filesystem::path& filePath, SessionMod
                 for (size_t i = 0; i < 9; ++i)
                 {
                     registration.inverse.matrix[i] = item["inverse_matrix_3x3"][i].get<double>();
+                }
+            }
+
+            registration.hasManualAdjustment = item.value("has_manual_adjustment", false);
+            // Sessions saved before Transpose existed have no base_forward/base_inverse -- fall
+            // back to the plain forward/inverse already parsed above, matching "no adjustment yet".
+            registration.baseForward = registration.forward;
+            registration.baseInverse = registration.inverse;
+            if (item.contains("base_forward_matrix_3x3") && item["base_forward_matrix_3x3"].is_array() &&
+                item["base_forward_matrix_3x3"].size() == 9)
+            {
+                for (size_t i = 0; i < 9; ++i)
+                {
+                    registration.baseForward.matrix[i] = item["base_forward_matrix_3x3"][i].get<double>();
+                }
+            }
+            if (item.contains("base_inverse_matrix_3x3") && item["base_inverse_matrix_3x3"].is_array() &&
+                item["base_inverse_matrix_3x3"].size() == 9)
+            {
+                for (size_t i = 0; i < 9; ++i)
+                {
+                    registration.baseInverse.matrix[i] = item["base_inverse_matrix_3x3"][i].get<double>();
+                }
+            }
+            if (item.contains("manual_adjustment_matrix_3x3") && item["manual_adjustment_matrix_3x3"].is_array() &&
+                item["manual_adjustment_matrix_3x3"].size() == 9)
+            {
+                for (size_t i = 0; i < 9; ++i)
+                {
+                    registration.manualAdjustment.matrix[i] = item["manual_adjustment_matrix_3x3"][i].get<double>();
                 }
             }
 

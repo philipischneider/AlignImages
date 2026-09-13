@@ -2,6 +2,7 @@
 
 #include "core/WinDialogUtils.h"
 #include "core/DpiUtilsWin.h"
+#include "core/Transform2DMath.h"
 
 #include "imgui.h"
 
@@ -309,6 +310,7 @@ int EnsureRegistrationsForValidPairs(const std::vector<PairRecord>& pairs,
 
 void MainWindow::Draw(AppContext& context, GLFWwindow* window)
 {
+    context.uiScale = ResolveUiScaleForWindow(window, context.session.uiPreferences);
     ProcessAsyncTasks(context);
     ProcessBatchStep(context);
 
@@ -976,6 +978,7 @@ void MainWindow::DrawLeftPanel(AppContext& context, GLFWwindow* window)
         }
         else
         {
+            context.transposeModeEnabled = false;
             context.session.projectPreferences.useAlignmentPreview = true;
             m_lastMessage = "Landmark mode enabled. Click a point in Stack B, then the matching point in Stack A.";
         }
@@ -986,6 +989,49 @@ void MainWindow::DrawLeftPanel(AppContext& context, GLFWwindow* window)
     }
     ImGui::Separator();
     DrawLandmarkEditor(context);
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Transpose Refinement (Preview panel)");
+    ShowHoveredHelp("Draws an action-line gizmo in the Preview viewer for fine adjustments -- click-drag to place "
+                    "a pivot + control point. Drag the pivot handle to move the whole image. Drag the control "
+                    "handle to rotate and scale around the pivot at once: moving it farther from the pivot scales "
+                    "up, closer scales down, and changing its angle relative to the pivot rotates. This adjustment "
+                    "is stored separately from landmarks/auto-alignment and composes on top of them -- editing "
+                    "landmarks afterward does not erase it.");
+    if (ImGui::Button(context.transposeModeEnabled ? "Disable Transpose Mode" : "Enable Transpose Mode"))
+    {
+        context.transposeModeEnabled = !context.transposeModeEnabled;
+        if (context.transposeModeEnabled)
+        {
+            context.landmarkModeEnabled = false;
+            context.session.projectPreferences.useAlignmentPreview = true;
+            m_lastMessage = "Transpose mode enabled. Click-drag in the Preview panel to place the action line.";
+        }
+    }
+    if (context.transposeModeEnabled)
+    {
+        ImGui::SameLine();
+        if (ImGui::Button("Clear Gizmo"))
+        {
+            context.transposeState = TransposeState{};
+        }
+        ShowHoveredHelp("Forgets the current pivot/control point placement so you can redraw the action line from scratch. Does not affect the stored adjustment.");
+    }
+    {
+        RegistrationResult* activeRegistration = GetOrCreateCurrentRegistration(context);
+        if (activeRegistration != nullptr && activeRegistration->hasManualAdjustment)
+        {
+            ImGui::SameLine();
+            if (ImGui::Button("Reset Adjustment"))
+            {
+                activeRegistration->manualAdjustment = Transform2D{};
+                activeRegistration->hasManualAdjustment = false;
+                activeRegistration->forward = activeRegistration->baseForward;
+                activeRegistration->inverse = activeRegistration->baseInverse;
+            }
+            ShowHoveredHelp("Clears the Transpose delta for the active pair, reverting to the landmark/auto-alignment base transform.");
+        }
+    }
 
     ImGui::Separator();
     ImGui::TextUnformatted("Transform Interpolation");
@@ -1496,6 +1542,7 @@ void MainWindow::RunCurrentAlignment(AppContext& context)
                 taskResult.result = landmarkRegistration.ComputeFromLandmarks(taskResult.registration);
                 if (taskResult.result.ok)
                 {
+                    UpdateRegistrationBasePreservingAdjustment(taskResult.registration);
                     taskResult.registration.isManual = true;
                     taskResult.pairStatus = PairStatus::Manual;
                     taskResult.workflowPhase = WorkflowPhase::ManualRefinement;
@@ -1521,6 +1568,7 @@ void MainWindow::RunCurrentAlignment(AppContext& context)
                 return taskResult;
             }
 
+            ResetRegistrationBase(taskResult.registration);
             taskResult.pairStatus = taskResult.registration.score >= 0.15 ? PairStatus::Aligned : PairStatus::Suspect;
             return taskResult;
         });
@@ -1651,6 +1699,7 @@ void MainWindow::RunBatchAlignment(AppContext& context)
                                          registration = landmarkRegistration.ComputeFromLandmarks(computed);
                                          if (registration.ok)
                                          {
+                                             UpdateRegistrationBasePreservingAdjustment(computed);
                                              computed.isManual = true;
                                          }
                                      }
@@ -1658,6 +1707,10 @@ void MainWindow::RunBatchAlignment(AppContext& context)
                                      {
                                          registration = registrationEngine.RegisterCtToPhoto(
                                              movingImage, fixedImage, computed, useAffine);
+                                         if (registration.ok)
+                                         {
+                                             ResetRegistrationBase(computed);
+                                         }
                                      }
 
                                      if (!registration.ok)
@@ -2139,6 +2192,7 @@ void MainWindow::ApplyManualLandmarks(AppContext& context)
         m_lastMessage = result.message;
         return;
     }
+    UpdateRegistrationBasePreservingAdjustment(*registration);
 
     const int operationId = AppendOperation(
         context.session,
@@ -2203,6 +2257,7 @@ void MainWindow::PropagateManualLandmarksToAll(AppContext& context)
         m_lastMessage = computeResult.message;
         return;
     }
+    UpdateRegistrationBasePreservingAdjustment(source);
 
     EnsureRegistrationsForValidPairs(GetActivePairing(context.session).pairs, context.session.registrations, GetActivePairing(context.session).fixedStackId, GetActivePairing(context.session).movingStackId);
 
@@ -2237,6 +2292,9 @@ void MainWindow::PropagateManualLandmarksToAll(AppContext& context)
         if (pair.fixedIndex != source.fixedIndex || pair.movingIndex != source.movingIndex)
         {
             target.landmarks.clear();
+            // This pair gets a freshly propagated base; a Transpose delta computed relative to
+            // the source pair's pivot would be geometrically meaningless here, so discard it.
+            ResetRegistrationBase(target);
         }
         StoreRegistrationResult(context, target, operationId);
     }
@@ -2284,6 +2342,7 @@ void MainWindow::PropagateManualLandmarksToInterval(AppContext& context, int fro
         m_lastMessage = computeResult.message;
         return;
     }
+    UpdateRegistrationBasePreservingAdjustment(source);
 
     EnsureRegistrationsForValidPairs(GetActivePairing(context.session).pairs, context.session.registrations, GetActivePairing(context.session).fixedStackId, GetActivePairing(context.session).movingStackId);
 
@@ -2323,6 +2382,7 @@ void MainWindow::PropagateManualLandmarksToInterval(AppContext& context, int fro
         if (pair.fixedIndex != source.fixedIndex || pair.movingIndex != source.movingIndex)
         {
             target.landmarks.clear();
+            ResetRegistrationBase(target);
         }
         StoreRegistrationResult(context, target, operationId);
         pair.status = PairStatus::Manual;
@@ -2487,6 +2547,7 @@ void MainWindow::RunPriorRefinement(AppContext& context)
                 refined.movingIndex       = reg.movingIndex;
                 refined.isManual          = false;
                 refined.convergenceOutlier = false;
+                ResetRegistrationBase(refined);
                 reg = refined;
                 ++taskResult.refined;
             }

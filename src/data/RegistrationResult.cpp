@@ -1,7 +1,28 @@
 #include "data/RegistrationResult.h"
 
+#include "core/Transform2DMath.h"
+
 namespace align
 {
+void ResetRegistrationBase(RegistrationResult& registration)
+{
+    registration.baseForward = registration.forward;
+    registration.baseInverse = registration.inverse;
+    registration.manualAdjustment = Transform2D{};
+    registration.hasManualAdjustment = false;
+}
+
+void UpdateRegistrationBasePreservingAdjustment(RegistrationResult& registration)
+{
+    registration.baseForward = registration.forward;
+    registration.baseInverse = registration.inverse;
+    if (registration.hasManualAdjustment)
+    {
+        registration.forward = ComposeTransform2D(registration.manualAdjustment, registration.baseForward);
+        registration.inverse = InvertTransform2D(registration.forward);
+    }
+}
+
 void AppendHistorySnapshot(RegistrationResult& registration, const std::string& label)
 {
     RegistrationSnapshot snapshot;

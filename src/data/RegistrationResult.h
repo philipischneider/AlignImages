@@ -52,6 +52,14 @@ struct RegistrationResult
     SliceIndex movingIndex = -1;
     Transform2D forward;
     Transform2D inverse;
+    // baseForward/baseInverse hold whatever landmarks/auto-registration computed; manualAdjustment
+    // is an extra delta from the Transpose gizmo composed on top (forward = manualAdjustment ∘
+    // baseForward). Kept separate so editing landmarks or re-running auto doesn't silently discard
+    // a Transpose refinement, and vice versa.
+    Transform2D baseForward;
+    Transform2D baseInverse;
+    Transform2D manualAdjustment;
+    bool hasManualAdjustment = false;
     std::string transformType = "similarity";
     double score = 0.0;
     double manualRmsError = 0.0;
@@ -101,4 +109,14 @@ const RegistrationResult* FindRegistrationResult(const std::vector<RegistrationR
                                                  SliceIndex fixedIndex,
                                                  SliceIndex movingIndex);
 void AppendHistorySnapshot(RegistrationResult& registration, const std::string& label);
+
+// Auto-registration/prior-refinement/interpolation are treated as an intentional reset of the
+// base transform: any earlier Transpose delta is discarded since it was computed relative to a
+// now-stale base. Call after forward/inverse have been freshly (re)computed.
+void ResetRegistrationBase(RegistrationResult& registration);
+
+// Landmark recompute (including a live in-progress drag) updates only the base transform; a
+// previously-applied Transpose delta, if any, is preserved and re-composed on top of the new
+// base. Call after forward/inverse have been freshly recomputed from landmarks.
+void UpdateRegistrationBasePreservingAdjustment(RegistrationResult& registration);
 } // namespace align

@@ -151,6 +151,8 @@ int ApplyTransformInterpolation(const std::vector<PairRecord>& pairs,
             interp.movingIndex   = pair.movingIndex;
             interp.forward       = fwd;
             interp.inverse       = inv;
+            interp.baseForward   = fwd;
+            interp.baseInverse   = inv;
             interp.transformType = "interpolated";
             interp.converged     = true;
             interp.isInterpolated = true;

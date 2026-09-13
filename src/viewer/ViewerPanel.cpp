@@ -1,5 +1,6 @@
 ﻿#include "viewer/ViewerPanel.h"
 
+#include "core/Transform2DMath.h"
 #include "io/DicomLoader.h"
 #include "registration/LandmarkRegistration.h"
 
@@ -147,7 +148,8 @@ bool HasUsableTransform(const RegistrationResult* registration)
         return false;
     }
 
-    return registration->converged || registration->isManual || !registration->iterations.empty();
+    return registration->converged || registration->isManual || !registration->iterations.empty() ||
+           registration->hasManualAdjustment;
 }
 
 bool HasFixedPoint(const LandmarkPair& landmark)
@@ -199,6 +201,7 @@ void UpdateManualPreviewRegistration(RegistrationResult& registration)
         registration.converged = false;
         registration.isManual = false;
         registration.iterations.clear();
+        UpdateRegistrationBasePreservingAdjustment(registration);
         return;
     }
 
@@ -210,6 +213,7 @@ void UpdateManualPreviewRegistration(RegistrationResult& registration)
         preview.fixedIndex = registration.fixedIndex;
         preview.movingIndex = registration.movingIndex;
         preview.landmarks = registration.landmarks;
+        UpdateRegistrationBasePreservingAdjustment(preview);
         registration = std::move(preview);
     }
 }
@@ -254,7 +258,11 @@ void ExtractTransformParameters(const RegistrationResult* registration,
         return;
     }
 
-    if (!registration->iterations.empty())
+    // A Transpose adjustment mutates forward/inverse directly without touching the optimizer's
+    // iteration history, so once one is applied the iteration record is stale -- decompose the
+    // live matrix instead, otherwise cache-comparisons elsewhere (see m_loadedTx/Ty/Theta/Scale)
+    // would never notice the change and the preview would never refresh.
+    if (!registration->hasManualAdjustment && !registration->iterations.empty())
     {
         const IterationRecord& iteration = registration->iterations.back();
         tx = iteration.tx;
@@ -420,11 +428,68 @@ ViewerPanel::ViewerPanel(std::string title, ViewerContent content)
 {
 }
 
-void ViewerPanel::ResetView()
+ZoomPanState ViewerPanel::GetZoomPanState(AppContext& context)
 {
-    m_zoom = 1.0f;
-    m_panX = 0.0f;
-    m_panY = 0.0f;
+    if (context.session.uiPreferences.syncViewports)
+    {
+        return ZoomPanState{context.sharedZoom, context.sharedPanX, context.sharedPanY};
+    }
+    return ZoomPanState{m_zoom, m_panX, m_panY};
+}
+
+void ViewerPanel::ResetView(AppContext& context)
+{
+    ZoomPanState zoomPan = GetZoomPanState(context);
+    zoomPan.zoom = 1.0f;
+    zoomPan.panX = 0.0f;
+    zoomPan.panY = 0.0f;
+}
+
+void ViewerPanel::DrawPreviewModeControls(AppContext& context)
+{
+    UiPreferences& prefs = context.session.uiPreferences;
+    ImGui::PushID("preview_mode_controls");
+
+    auto modeButton = [&](const char* label, PreviewMode mode)
+    {
+        const bool isActive = prefs.previewMode == mode;
+        if (isActive)
+        {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.27f, 0.46f, 0.79f, 1.0f));
+        }
+        if (ImGui::Button(label))
+        {
+            prefs.previewMode = mode;
+        }
+        if (isActive)
+        {
+            ImGui::PopStyleColor();
+        }
+        ImGui::SameLine();
+    };
+
+    modeButton("Blend", PreviewMode::Blend);
+    modeButton("Checkerboard", PreviewMode::Checkerboard);
+    modeButton("Difference", PreviewMode::Difference);
+    modeButton("Multiply", PreviewMode::Multiply);
+    ImGui::NewLine();
+
+    if (prefs.previewMode == PreviewMode::Blend)
+    {
+        ImGui::SliderFloat("Blend Alpha", &prefs.blendAlpha, 0.0f, 1.0f, "%.2f");
+    }
+    else if (prefs.previewMode == PreviewMode::Checkerboard)
+    {
+        ImGui::SliderInt("Checker Size", &prefs.checkerSize, 4, 128);
+    }
+    ImGui::Checkbox("Sync Viewports (zoom/pan)", &prefs.syncViewports);
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
+    {
+        ImGui::SetTooltip("When enabled, zooming/panning any of the 3 viewers moves all of them together.");
+    }
+
+    ImGui::PopID();
+    ImGui::Separator();
 }
 
 void ViewerPanel::Draw(AppContext& context, const ImVec2& size)
@@ -437,23 +502,29 @@ void ViewerPanel::Draw(AppContext& context, const ImVec2& size)
     ImGui::Separator();
 
     ImGui::PushID(m_title.c_str());
+    ZoomPanState zoomPan = GetZoomPanState(context);
     if (ImGui::Button("Fit"))
     {
-        ResetView();
+        ResetView(context);
     }
     ImGui::SameLine();
     if (ImGui::Button("1:1"))
     {
-        m_zoom = m_lastFitScale > 0.0f ? 1.0f / m_lastFitScale : 1.0f;
+        zoomPan.zoom = m_lastFitScale > 0.0f ? 1.0f / m_lastFitScale : 1.0f;
     }
     ImGui::SameLine();
     if (ImGui::Button("Reset"))
     {
-        ResetView();
+        ResetView(context);
     }
     ImGui::SameLine();
-    ImGui::Text("Zoom %.2fx", m_zoom);
+    ImGui::Text("Zoom %.2fx", zoomPan.zoom);
     ImGui::PopID();
+
+    if (m_content == ViewerContent::Preview)
+    {
+        DrawPreviewModeControls(context);
+    }
 
     if (m_content == ViewerContent::StackA)
     {
@@ -712,14 +783,15 @@ void ViewerPanel::DrawImageCanvas(AppContext& context, const ImVec2& canvasSize)
         return;
     }
 
+    ZoomPanState zoomPan = GetZoomPanState(context);
     const float baseWidth = static_cast<float>(m_texture.GetWidth());
     const float baseHeight = static_cast<float>(m_texture.GetHeight());
     const float fitScale = (std::min)(canvasSize.x / baseWidth, canvasSize.y / baseHeight);
     m_lastFitScale = fitScale > 0.0f ? fitScale : 1.0f;
-    const float drawWidth = baseWidth * m_lastFitScale * m_zoom;
-    const float drawHeight = baseHeight * m_lastFitScale * m_zoom;
+    const float drawWidth = baseWidth * m_lastFitScale * zoomPan.zoom;
+    const float drawHeight = baseHeight * m_lastFitScale * zoomPan.zoom;
 
-    const ImVec2 center(canvasStart.x + canvasSize.x * 0.5f + m_panX, canvasStart.y + canvasSize.y * 0.5f + m_panY);
+    const ImVec2 center(canvasStart.x + canvasSize.x * 0.5f + zoomPan.panX, canvasStart.y + canvasSize.y * 0.5f + zoomPan.panY);
     const ImVec2 min(center.x - drawWidth * 0.5f, center.y - drawHeight * 0.5f);
     const ImVec2 max(center.x + drawWidth * 0.5f, center.y + drawHeight * 0.5f);
 
@@ -732,19 +804,19 @@ void ViewerPanel::DrawImageCanvas(AppContext& context, const ImVec2& canvasSize)
         if (wheel != 0.0f)
         {
             const float zoomFactor = wheel > 0.0f ? 1.1f : 0.9f;
-            m_zoom = (std::clamp)(m_zoom * zoomFactor, 0.05f, 20.0f);
+            zoomPan.zoom = (std::clamp)(zoomPan.zoom * zoomFactor, 0.05f, 20.0f);
         }
 
         if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle))
         {
             const ImVec2 delta = ImGui::GetIO().MouseDelta;
-            m_panX += delta.x;
-            m_panY += delta.y;
+            zoomPan.panX += delta.x;
+            zoomPan.panY += delta.y;
         }
 
         if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Middle))
         {
-            ResetView();
+            ResetView(context);
         }
     }
 
@@ -756,7 +828,7 @@ void ViewerPanel::DrawImageCanvas(AppContext& context, const ImVec2& canvasSize)
                               context.session.projectPreferences.useAlignmentPreview &&
                               HasUsableTransform(currentRegistration);
     int hoveredLandmarkIndex = -1;
-    constexpr float kHitRadius = 10.0f;
+    const float kHitRadius = 10.0f * context.uiScale;
 
     if (displayedRegistration != nullptr && m_content != ViewerContent::Preview)
     {
@@ -805,10 +877,10 @@ void ViewerPanel::DrawImageCanvas(AppContext& context, const ImVec2& canvasSize)
                 hoveredLandmarkIndex = i;
             }
 
-            drawList->AddCircleFilled(screenPoint, isSelected ? 7.0f : 5.0f,
+            drawList->AddCircleFilled(screenPoint, (isSelected ? 7.0f : 5.0f) * context.uiScale,
                                       isSelected ? IM_COL32(255, 110, 80, 255) : IM_COL32(250, 190, 60, 255));
-            drawList->AddText(ImVec2(screenPoint.x + 6.0f, screenPoint.y - 6.0f), IM_COL32(255, 245, 210, 255),
-                              std::to_string(i + 1).c_str());
+            drawList->AddText(ImVec2(screenPoint.x + 6.0f * context.uiScale, screenPoint.y - 6.0f * context.uiScale),
+                              IM_COL32(255, 245, 210, 255), std::to_string(i + 1).c_str());
         }
     }
 
@@ -943,17 +1015,165 @@ void ViewerPanel::DrawImageCanvas(AppContext& context, const ImVec2& canvasSize)
         {
             ImGui::SetMouseCursor(ImGuiMouseCursor_None);
             const ImVec2 mouse = ImGui::GetIO().MousePos;
-            constexpr float kCrosshairSize = 10.0f;
-            constexpr float kCrosshairGap = 3.0f;
+            const float kCrosshairSize = 10.0f * context.uiScale;
+            const float kCrosshairGap = 3.0f * context.uiScale;
+            const float kCrosshairThickness = 1.5f * context.uiScale;
             const ImU32 crosshairColor = IM_COL32(250, 220, 60, 255);
-            drawList->AddLine(ImVec2(mouse.x - kCrosshairSize, mouse.y), ImVec2(mouse.x - kCrosshairGap, mouse.y), crosshairColor, 1.5f);
-            drawList->AddLine(ImVec2(mouse.x + kCrosshairGap, mouse.y), ImVec2(mouse.x + kCrosshairSize, mouse.y), crosshairColor, 1.5f);
-            drawList->AddLine(ImVec2(mouse.x, mouse.y - kCrosshairSize), ImVec2(mouse.x, mouse.y - kCrosshairGap), crosshairColor, 1.5f);
-            drawList->AddLine(ImVec2(mouse.x, mouse.y + kCrosshairGap), ImVec2(mouse.x, mouse.y + kCrosshairSize), crosshairColor, 1.5f);
-            drawList->AddCircle(mouse, kCrosshairGap, crosshairColor, 0, 1.5f);
+            drawList->AddLine(ImVec2(mouse.x - kCrosshairSize, mouse.y), ImVec2(mouse.x - kCrosshairGap, mouse.y), crosshairColor, kCrosshairThickness);
+            drawList->AddLine(ImVec2(mouse.x + kCrosshairGap, mouse.y), ImVec2(mouse.x + kCrosshairSize, mouse.y), crosshairColor, kCrosshairThickness);
+            drawList->AddLine(ImVec2(mouse.x, mouse.y - kCrosshairSize), ImVec2(mouse.x, mouse.y - kCrosshairGap), crosshairColor, kCrosshairThickness);
+            drawList->AddLine(ImVec2(mouse.x, mouse.y + kCrosshairGap), ImVec2(mouse.x, mouse.y + kCrosshairSize), crosshairColor, kCrosshairThickness);
+            drawList->AddCircle(mouse, kCrosshairGap, crosshairColor, 0, kCrosshairThickness);
         }
     }
 
+    if (m_content == ViewerContent::Preview && context.transposeModeEnabled)
+    {
+        DrawTransposeGizmo(context, drawList, min, max, canvasHovered);
+    }
+
     drawList->PopClipRect();
+}
+
+void ViewerPanel::DrawTransposeGizmo(AppContext& context, ImDrawList* drawList, const ImVec2& imageMin, const ImVec2& imageMax, bool canvasHovered)
+{
+    TransposeState& tp = context.transposeState;
+    const ImVec2 mouse = ImGui::GetIO().MousePos;
+    const float handleRadius = 8.0f * context.uiScale;
+    const float hitRadius = handleRadius * 2.0f;
+    const ImU32 lineColor = IM_COL32(80, 220, 255, 255);
+    const ImU32 moveColor = IM_COL32(255, 210, 60, 255);
+    const ImU32 rotateScaleColor = IM_COL32(255, 120, 200, 255);
+
+    if (!tp.hasActionLine)
+    {
+        if (canvasHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+        {
+            double imageX = 0.0, imageY = 0.0;
+            if (TryMapMouseToImage(mouse, imageMin, imageMax, m_texture.GetWidth(), m_texture.GetHeight(), imageX, imageY))
+            {
+                tp.pivotX = imageX;
+                tp.pivotY = imageY;
+                tp.controlX = imageX;
+                tp.controlY = imageY;
+                tp.isPlacingActionLine = true;
+            }
+        }
+
+        if (tp.isPlacingActionLine)
+        {
+            double imageX = 0.0, imageY = 0.0;
+            if (TryMapMouseToImage(mouse, imageMin, imageMax, m_texture.GetWidth(), m_texture.GetHeight(), imageX, imageY))
+            {
+                tp.controlX = imageX;
+                tp.controlY = imageY;
+            }
+
+            const ImVec2 pivotScreen = ToScreenPoint(tp.pivotX, tp.pivotY, imageMin, imageMax, m_texture.GetWidth(), m_texture.GetHeight());
+            const ImVec2 controlScreen = ToScreenPoint(tp.controlX, tp.controlY, imageMin, imageMax, m_texture.GetWidth(), m_texture.GetHeight());
+            drawList->AddLine(pivotScreen, controlScreen, lineColor, 2.0f);
+            drawList->AddCircle(pivotScreen, handleRadius, moveColor, 0, 2.0f);
+
+            if (ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+            {
+                tp.isPlacingActionLine = false;
+                const double dx = tp.controlX - tp.pivotX;
+                const double dy = tp.controlY - tp.pivotY;
+                if (std::sqrt(dx * dx + dy * dy) > 4.0)
+                {
+                    tp.hasActionLine = true;
+                }
+            }
+        }
+        return;
+    }
+
+    RegistrationResult* registration = GetOrCreateCurrentRegistration(context);
+
+    const ImVec2 pivotScreen = ToScreenPoint(tp.pivotX, tp.pivotY, imageMin, imageMax, m_texture.GetWidth(), m_texture.GetHeight());
+    const ImVec2 controlScreen = ToScreenPoint(tp.controlX, tp.controlY, imageMin, imageMax, m_texture.GetWidth(), m_texture.GetHeight());
+    const ImVec2 middleScreen((pivotScreen.x + controlScreen.x) * 0.5f, (pivotScreen.y + controlScreen.y) * 0.5f);
+
+    drawList->AddLine(pivotScreen, controlScreen, lineColor, 2.0f);
+    drawList->AddCircle(pivotScreen, handleRadius, moveColor, 0, 2.0f);
+    drawList->AddCircle(middleScreen, handleRadius, moveColor, 0, 2.0f);
+    drawList->AddCircle(controlScreen, handleRadius, rotateScaleColor, 0, 2.0f);
+
+    if (canvasHovered && tp.activeDragZone == TransposeZone::None && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+    {
+        double imageX = 0.0, imageY = 0.0;
+        if (TryMapMouseToImage(mouse, imageMin, imageMax, m_texture.GetWidth(), m_texture.GetHeight(), imageX, imageY))
+        {
+            if (DistanceSquared(mouse, pivotScreen) <= hitRadius * hitRadius ||
+                DistanceSquared(mouse, middleScreen) <= hitRadius * hitRadius)
+            {
+                tp.activeDragZone = TransposeZone::Move;
+            }
+            else if (DistanceSquared(mouse, controlScreen) <= hitRadius * hitRadius)
+            {
+                tp.activeDragZone = TransposeZone::RotateScale;
+            }
+
+            if (tp.activeDragZone != TransposeZone::None)
+            {
+                tp.dragStartPivotX = tp.pivotX;
+                tp.dragStartPivotY = tp.pivotY;
+                tp.dragStartControlX = tp.controlX;
+                tp.dragStartControlY = tp.controlY;
+                tp.dragStartMouseImageX = imageX;
+                tp.dragStartMouseImageY = imageY;
+                tp.dragStartAdjustment = registration != nullptr ? registration->manualAdjustment : Transform2D{};
+            }
+        }
+    }
+
+    if (tp.activeDragZone != TransposeZone::None)
+    {
+        double imageX = 0.0, imageY = 0.0;
+        if (registration != nullptr && TryMapMouseToImage(mouse, imageMin, imageMax, m_texture.GetWidth(), m_texture.GetHeight(), imageX, imageY))
+        {
+            Transform2D frameDelta;
+            if (tp.activeDragZone == TransposeZone::Move)
+            {
+                // Dragging the pivot translates the whole image; pivot and control point move together.
+                const double dx = imageX - tp.dragStartMouseImageX;
+                const double dy = imageY - tp.dragStartMouseImageY;
+                frameDelta = MakeTranslation2D(dx, dy);
+                tp.pivotX = tp.dragStartPivotX + dx;
+                tp.pivotY = tp.dragStartPivotY + dy;
+                tp.controlX = tp.dragStartControlX + dx;
+                tp.controlY = tp.dragStartControlY + dy;
+            }
+            else // RotateScale: distance from pivot drives scale, angle around pivot drives rotation -- both at once.
+            {
+                const double startDx = tp.dragStartControlX - tp.dragStartPivotX;
+                const double startDy = tp.dragStartControlY - tp.dragStartPivotY;
+                const double startDist = std::sqrt(startDx * startDx + startDy * startDy);
+                const double currentDx = imageX - tp.dragStartPivotX;
+                const double currentDy = imageY - tp.dragStartPivotY;
+                const double currentDist = std::sqrt(currentDx * currentDx + currentDy * currentDy);
+
+                const double factor = startDist > 1e-6 ? currentDist / startDist : 1.0;
+                const double startAngle = std::atan2(startDy, startDx);
+                const double currentAngle = std::atan2(currentDy, currentDx);
+                const double deltaAngle = currentAngle - startAngle;
+
+                frameDelta = MakeRotateScaleAround2D(tp.dragStartPivotX, tp.dragStartPivotY, deltaAngle, factor);
+                const cv::Point2d newControl = ApplyTransformToPoint(frameDelta, tp.dragStartControlX, tp.dragStartControlY);
+                tp.controlX = newControl.x;
+                tp.controlY = newControl.y;
+            }
+
+            registration->manualAdjustment = ComposeTransform2D(frameDelta, tp.dragStartAdjustment);
+            registration->hasManualAdjustment = true;
+            registration->forward = ComposeTransform2D(registration->manualAdjustment, registration->baseForward);
+            registration->inverse = InvertTransform2D(registration->forward);
+        }
+
+        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+        {
+            tp.activeDragZone = TransposeZone::None;
+        }
+    }
 }
 } // namespace align

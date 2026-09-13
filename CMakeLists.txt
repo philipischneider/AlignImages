@@ -25,6 +25,7 @@ set(ALIGN_IMAGES_SOURCES
     src/app/Application.cpp
     src/core/DpiUtilsWin.cpp
     src/core/WinDialogUtils.cpp
+    src/core/Transform2DMath.cpp
     src/data/SessionModel.cpp
     src/data/PairingModel.cpp
     src/data/RegistrationResult.cpp
