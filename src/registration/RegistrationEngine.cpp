@@ -408,6 +408,151 @@ double ComputeCombinedScore(const LevelData& level, const Transform2D& transform
 }
 
 // ============================================================
+// Mutual information — self-contained, downsamples internally so it's cheap enough to
+// call every frame for a live readout (see MUTUAL_INFORMATION_PLAN.md).
+// ============================================================
+
+// Longest-side cap for the working resolution; keeps histogram building fast enough to run
+// once per rendered frame while the user drags landmarks or the Transpose gizmo.
+constexpr int kMiDownsampleMaxDim = 220;
+constexpr int kMiHistogramBins = 32;
+
+double ComputeMutualInformationScoreImpl(const cv::Mat& movingImageBgr, const cv::Mat& fixedImageBgr, const Transform2D& transform)
+{
+    if (movingImageBgr.empty() || fixedImageBgr.empty())
+    {
+        return 0.0;
+    }
+
+    const int longestSide = (std::max)(fixedImageBgr.cols, fixedImageBgr.rows);
+    const double scale = longestSide > kMiDownsampleMaxDim
+                             ? static_cast<double>(kMiDownsampleMaxDim) / static_cast<double>(longestSide)
+                             : 1.0;
+    const cv::Size workingSize((std::max)(1, static_cast<int>(fixedImageBgr.cols * scale)),
+                               (std::max)(1, static_cast<int>(fixedImageBgr.rows * scale)));
+
+    cv::Mat fixedGray;
+    cv::cvtColor(fixedImageBgr, fixedGray, cv::COLOR_BGR2GRAY);
+    cv::Mat fixedSmall;
+    cv::resize(fixedGray, fixedSmall, workingSize, 0, 0, cv::INTER_AREA);
+
+    cv::Mat movingGray;
+    cv::cvtColor(movingImageBgr, movingGray, cv::COLOR_BGR2GRAY);
+
+    // `movingGray` is left at full resolution (warpAffine's cost is driven by the destination
+    // size, not the source size, so there's no need to also downsample it) while the destination
+    // canvas is the small `workingSize`. The map from full-res moving coordinates to
+    // small-canvas fixed coordinates is fixedSmall = scale*(A*moving + t) = (scale*A)*moving +
+    // scale*t -- i.e. the WHOLE affine matrix scales uniformly, not just the translation. Scaling
+    // only the translation (as an earlier version of this function did) leaves the linear part
+    // too "large" for the small destination, so warpAffine ends up sampling a tiny corner of the
+    // full-resolution moving image instead of the whole (equivalently shrunk) frame -- comparing
+    // unrelated pixels and pinning MI near 0 regardless of actual alignment quality.
+    Transform2D scaledTransform = transform;
+    scaledTransform.matrix[0] *= scale;
+    scaledTransform.matrix[1] *= scale;
+    scaledTransform.matrix[2] *= scale;
+    scaledTransform.matrix[3] *= scale;
+    scaledTransform.matrix[4] *= scale;
+    scaledTransform.matrix[5] *= scale;
+
+    const cv::Mat affine = (cv::Mat_<double>(2, 3) <<
+        scaledTransform.matrix[0], scaledTransform.matrix[1], scaledTransform.matrix[2],
+        scaledTransform.matrix[3], scaledTransform.matrix[4], scaledTransform.matrix[5]);
+
+    cv::Mat warpedMoving;
+    cv::warpAffine(movingGray, warpedMoving, affine, workingSize, cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0));
+
+    // Validity mask from the warp's own support region (not from pixel intensity): a
+    // pixel-value-based "exclude black" filter would wrongly discard real anatomy whenever the
+    // moving image's Window/Level maps most of the tissue near 0 (e.g. Bone/Soft Tissue presets),
+    // while only a wide window like Lung happened to spread values away from 0. Warping an
+    // all-white mask with the same transform/border marks exactly the pixels that fall outside
+    // the moving image's original extent, regardless of what Window/Level did to their intensity.
+    cv::Mat validitySource(movingGray.size(), CV_8UC1, cv::Scalar(255));
+    cv::Mat validity;
+    cv::warpAffine(validitySource, validity, affine, workingSize, cv::INTER_NEAREST, cv::BORDER_CONSTANT, cv::Scalar(0));
+
+    // Joint histogram with partial-volume interpolation on the moving-intensity axis (Maes et
+    // al. 1997 / Chen & Varshney 2003) -- splits each sample's weight between its two nearest
+    // moving-intensity bins by linear distance, instead of hard-rounding to one bin, to avoid
+    // the periodic false-minima artifacts a nearest-neighbor joint histogram would introduce.
+    std::vector<double> jointHist(static_cast<size_t>(kMiHistogramBins) * kMiHistogramBins, 0.0);
+    std::vector<double> fixedHist(kMiHistogramBins, 0.0);
+    std::vector<double> movingHist(kMiHistogramBins, 0.0);
+
+    const double binScale = static_cast<double>(kMiHistogramBins) / 256.0;
+    double totalWeight = 0.0;
+
+    for (int y = 0; y < workingSize.height; ++y)
+    {
+        const uchar* fixedRow = fixedSmall.ptr<uchar>(y);
+        const uchar* movingRow = warpedMoving.ptr<uchar>(y);
+        const uchar* validityRow = validity.ptr<uchar>(y);
+        for (int x = 0; x < workingSize.width; ++x)
+        {
+            // Only exclude pixels truly outside the moving image's warped extent -- not pixels
+            // that merely windowed to a dark value, which is valid content.
+            if (validityRow[x] == 0)
+            {
+                continue;
+            }
+
+            const uchar movingVal = movingRow[x];
+            const uchar fixedVal = fixedRow[x];
+            const int fBin = (std::min)(kMiHistogramBins - 1, static_cast<int>(fixedVal * binScale));
+            const double mBinF = movingVal * binScale;
+            const int mBin0 = (std::min)(kMiHistogramBins - 1, static_cast<int>(mBinF));
+            const int mBin1 = (std::min)(kMiHistogramBins - 1, mBin0 + 1);
+            const double mFrac = mBinF - mBin0;
+            const double wLow = 1.0 - mFrac;
+            const double wHigh = mFrac;
+
+            jointHist[static_cast<size_t>(fBin) * kMiHistogramBins + mBin0] += wLow;
+            jointHist[static_cast<size_t>(fBin) * kMiHistogramBins + mBin1] += wHigh;
+            fixedHist[fBin] += 1.0;
+            movingHist[mBin0] += wLow;
+            movingHist[mBin1] += wHigh;
+            totalWeight += 1.0;
+        }
+    }
+
+    if (totalWeight < 1.0)
+    {
+        return 0.0;
+    }
+
+    auto entropyOf = [totalWeight](const std::vector<double>& hist)
+    {
+        double h = 0.0;
+        for (const double count : hist)
+        {
+            if (count <= 0.0)
+            {
+                continue;
+            }
+            const double p = count / totalWeight;
+            h -= p * std::log(p);
+        }
+        return h;
+    };
+
+    const double hFixed = entropyOf(fixedHist);
+    const double hMoving = entropyOf(movingHist);
+    const double hJoint = entropyOf(jointHist);
+    const double mutualInformation = hFixed + hMoving - hJoint;
+
+    const double denom = hFixed + hMoving;
+    if (denom <= 1e-9)
+    {
+        return 0.0;
+    }
+
+    // Normalized mutual information: 2*I(F,R)/(H(F)+H(R)), in [0,1] like the other scores.
+    return (std::clamp)(2.0 * mutualInformation / denom, 0.0, 1.0);
+}
+
+// ============================================================
 // Refinement — pyramid levels + parallel candidate evaluation
 // ============================================================
 
@@ -665,6 +810,13 @@ std::array<LevelData, 3> BuildPyramid(const cv::Mat& movingMask,
 // ============================================================
 // Public API
 // ============================================================
+
+double RegistrationEngine::ComputeMutualInformationScore(const cv::Mat& movingImage,
+                                                         const cv::Mat& fixedImage,
+                                                         const Transform2D& transform) const
+{
+    return ComputeMutualInformationScoreImpl(movingImage, fixedImage, transform);
+}
 
 Result RegistrationEngine::RegisterCtToPhoto(const cv::Mat& movingImage,
                                              const cv::Mat& fixedImage,

@@ -488,6 +488,26 @@ void ViewerPanel::DrawPreviewModeControls(AppContext& context)
         ImGui::SetTooltip("When enabled, zooming/panning any of the 3 viewers moves all of them together.");
     }
 
+    if (m_liveMutualInformation >= 0.0)
+    {
+        const ImVec4 color = m_liveMutualInformation >= 0.6f ? ImVec4(0.4f, 0.9f, 0.5f, 1.0f)
+                             : m_liveMutualInformation >= 0.35f ? ImVec4(0.95f, 0.8f, 0.3f, 1.0f)
+                                                                : ImVec4(0.95f, 0.4f, 0.4f, 1.0f);
+        ImGui::TextColored(color, "Mutual Information: %.3f", m_liveMutualInformation);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
+        {
+            ImGui::SetTooltip("Normalized mutual information (0-1) between the fixed and aligned moving image, "
+                              "recomputed live as you adjust landmarks or the Transpose gizmo. Doesn't assume any "
+                              "direct intensity relationship between the two images, so it works across modalities "
+                              "(e.g. CT vs photo) where a pixel-difference metric would not. Higher is better "
+                              "aligned; the color bands are a rough guide, not a hard threshold.");
+        }
+    }
+    else
+    {
+        ImGui::TextDisabled("Mutual Information: n/a (enable 'Use Alignment In Preview')");
+    }
+
     ImGui::PopID();
     ImGui::Separator();
 }
@@ -576,6 +596,56 @@ Result ViewerPanel::LoadDisplayImage(AppContext& context, const StackModel& stac
     return Result{};
 }
 
+cv::Mat ViewerPanel::GetMetricsImage(AppContext& context, const StackModel& stack, const SliceRecord& slice, const cv::Mat& displayImage)
+{
+    if (!stack.isDicom)
+    {
+        return displayImage;
+    }
+
+    const cv::Mat raw = context.dicomPixelCache.GetOrDecode(slice.filePath);
+    if (raw.empty())
+    {
+        return displayImage;
+    }
+
+    DicomLoader dicomLoader;
+    cv::Mat remapped = dicomLoader.ApplyWindowLevel(raw, stack.rescaleSlope, stack.rescaleIntercept,
+                                                    stack.defaultWindowCenter, stack.defaultWindowWidth);
+    if (remapped.empty())
+    {
+        return displayImage;
+    }
+
+    ApplyOrientation(remapped, MakeDefaultLoadOptions(stack, slice));
+    return remapped;
+}
+
+Result ViewerPanel::GetOrDecodeImage(AppContext& context, const StackModel& stack, const SliceRecord& slice,
+                                     std::string& cacheKey, cv::Mat& cacheImage, cv::Mat& outImage)
+{
+    const std::string key = slice.filePath + "|" + std::to_string(stack.windowCenter) + "|" +
+                            std::to_string(stack.windowWidth) + "|" + (slice.flipHorizontal ? "1" : "0") +
+                            (slice.flipVertical ? "1" : "0") + "|" + std::to_string(slice.rotationDegrees);
+    if (cacheKey == key && !cacheImage.empty())
+    {
+        outImage = cacheImage;
+        return Result{};
+    }
+
+    cv::Mat decoded;
+    const Result result = LoadDisplayImage(context, stack, slice, decoded);
+    if (!result.ok)
+    {
+        return result;
+    }
+
+    cacheKey = key;
+    cacheImage = decoded;
+    outImage = decoded;
+    return Result{};
+}
+
 void ViewerPanel::RefreshTexture(AppContext& context)
 {
     cv::Mat image;
@@ -647,8 +717,6 @@ void ViewerPanel::RefreshTexture(AppContext& context)
         }
 
         if (m_loadedFilePath == slice->filePath &&
-            m_loadedTx == currentTx && m_loadedTy == currentTy && m_loadedTheta == currentTheta &&
-            m_loadedScale == currentScale &&
             m_loadedWindowCenterB == GetActiveMovingStack(context.session).windowCenter &&
             m_loadedWindowWidthB == GetActiveMovingStack(context.session).windowWidth &&
             m_loadedFlipHB == slice->flipHorizontal && m_loadedFlipVB == slice->flipVertical &&
@@ -670,10 +738,6 @@ void ViewerPanel::RefreshTexture(AppContext& context)
         m_texture.Upload(image);
         m_loadedFilePath = slice->filePath;
         m_loadedUsedAlignment = false;
-        m_loadedTx = currentTx;
-        m_loadedTy = currentTy;
-        m_loadedTheta = currentTheta;
-        m_loadedScale = currentScale;
         m_loadedWindowCenterB = GetActiveMovingStack(context.session).windowCenter;
         m_loadedWindowWidthB = GetActiveMovingStack(context.session).windowWidth;
         m_loadedFlipHB = slice->flipHorizontal;
@@ -689,6 +753,7 @@ void ViewerPanel::RefreshTexture(AppContext& context)
         m_statusText = "Preview: load both stacks to composite.";
         m_loadedSliceA = -1;
         m_loadedSliceB = -1;
+        m_liveMutualInformation = -1.0;
         return;
     }
 
@@ -713,8 +778,10 @@ void ViewerPanel::RefreshTexture(AppContext& context)
 
     cv::Mat imageA;
     cv::Mat imageB;
-    Result loadA = LoadDisplayImage(context, GetActiveFixedStack(context.session), *sliceA, imageA);
-    Result loadB = LoadDisplayImage(context, GetActiveMovingStack(context.session), *sliceB, imageB);
+    Result loadA = GetOrDecodeImage(context, GetActiveFixedStack(context.session), *sliceA,
+                                    m_decodedCacheKeyA, m_decodedImageA, imageA);
+    Result loadB = GetOrDecodeImage(context, GetActiveMovingStack(context.session), *sliceB,
+                                    m_decodedCacheKeyB, m_decodedImageB, imageB);
     if (!loadA.ok || !loadB.ok)
     {
         m_texture.Reset();
@@ -728,6 +795,14 @@ void ViewerPanel::RefreshTexture(AppContext& context)
     if (useAlignmentPreview)
     {
         movingForPreview = ApplyTransformToMoving(imageB, imageA.size(), registration->forward);
+
+        const cv::Mat miMoving = GetMetricsImage(context, GetActiveMovingStack(context.session), *sliceB, imageB);
+        const cv::Mat miFixed = GetMetricsImage(context, GetActiveFixedStack(context.session), *sliceA, imageA);
+        m_liveMutualInformation = m_registrationEngine.ComputeMutualInformationScore(miMoving, miFixed, registration->forward);
+    }
+    else
+    {
+        m_liveMutualInformation = -1.0;
     }
 
     cv::Mat preview = BuildPreviewImage(imageA, movingForPreview, context.session.uiPreferences);

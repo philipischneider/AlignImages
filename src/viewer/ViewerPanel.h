@@ -2,7 +2,10 @@
 
 #include "app/AppContext.h"
 #include "io/ImageLoader.h"
+#include "registration/RegistrationEngine.h"
 #include "viewer/ImageTexture.h"
+
+#include <opencv2/core.hpp>
 
 #include <string>
 
@@ -43,6 +46,18 @@ private:
     void ResetView(AppContext& context);
     ZoomPanState GetZoomPanState(AppContext& context);
     Result LoadDisplayImage(AppContext& context, const StackModel& stack, const SliceRecord& slice, cv::Mat& outImage);
+    // Returns the decoded (pre-transform) image for `slice`, reusing the last decode when the
+    // file/window/orientation are unchanged. Lets the Preview panel re-warp/re-composite on every
+    // transform change (dragging landmarks or the Transpose gizmo) without re-hitting disk each frame.
+    Result GetOrDecodeImage(AppContext& context, const StackModel& stack, const SliceRecord& slice,
+                            std::string& cacheKey, cv::Mat& cacheImage, cv::Mat& outImage);
+    // Image to feed alignment-quality metrics (e.g. live Mutual Information): for DICOM stacks,
+    // remapped using the stack's fixed default Window/Level rather than the live interactive
+    // slider, so the metric reflects alignment quality only -- not whatever the user happens to
+    // be looking at right now. Non-DICOM images have no window dependency, so `displayImage` is
+    // reused as-is. Reuses the already-decoded raw DICOM buffer (context.dicomPixelCache), no
+    // extra disk I/O.
+    cv::Mat GetMetricsImage(AppContext& context, const StackModel& stack, const SliceRecord& slice, const cv::Mat& displayImage);
 
     std::string m_title;
     ViewerContent m_content;
@@ -72,7 +87,13 @@ private:
     bool m_loadedFlipVB = false;
     int m_loadedRotationB = -1;
     float m_lastFitScale = 1.0f;
+    std::string m_decodedCacheKeyA;
+    cv::Mat m_decodedImageA;
+    std::string m_decodedCacheKeyB;
+    cv::Mat m_decodedImageB;
+    double m_liveMutualInformation = -1.0; // -1 = not available (e.g. alignment preview is off)
     ImageLoader m_imageLoader;
+    RegistrationEngine m_registrationEngine;
     ImageTexture m_texture;
     std::string m_statusText = "No image loaded.";
 };
