@@ -1,5 +1,11 @@
 # Align Images
 
+O modulo experimental independente de refinamento deformavel esta em
+[`experimental/deformable`](experimental/deformable/README.md). A primeira
+etapa prepara e audita os dados e gera uma revisao navegavel do alinhamento
+existente. O modulo tambem estima alinhamento global autonomo de pares novos,
+sem matrizes de sessao; deformacao local e continuidade ainda estao pendentes.
+
 Ferramenta desktop em C++ para alinhamento iterativo de pilhas de imagens 2D do Visible Human Project e de outras modalidades relacionadas.
 
 O projeto foi desenhado para Windows e hoje já cobre:
