@@ -289,6 +289,22 @@ cv::Mat ApplyTransformToMoving(const cv::Mat& moving, const cv::Size& targetSize
     return warped;
 }
 
+cv::Mat DetectContours(const cv::Mat& image)
+{
+    cv::Mat gray;
+    cv::cvtColor(image, gray, cv::COLOR_BGR2GRAY);
+    cv::Mat blurred;
+    cv::GaussianBlur(gray, blurred, cv::Size(5, 5), 1.0);
+    cv::Mat edges;
+    cv::Canny(blurred, edges, 60.0, 150.0);
+    return edges;
+}
+
+void DrawContours(cv::Mat& image, const cv::Mat& edges, const cv::Scalar& color)
+{
+    image.setTo(color, edges);
+}
+
 cv::Mat BuildPreviewImage(const cv::Mat& a, const cv::Mat& b, const UiPreferences& preferences)
 {
     if (a.empty() || b.empty())
@@ -450,44 +466,6 @@ void ViewerPanel::DrawPreviewModeControls(AppContext& context)
     UiPreferences& prefs = context.session.uiPreferences;
     ImGui::PushID("preview_mode_controls");
 
-    auto modeButton = [&](const char* label, PreviewMode mode)
-    {
-        const bool isActive = prefs.previewMode == mode;
-        if (isActive)
-        {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.27f, 0.46f, 0.79f, 1.0f));
-        }
-        if (ImGui::Button(label))
-        {
-            prefs.previewMode = mode;
-        }
-        if (isActive)
-        {
-            ImGui::PopStyleColor();
-        }
-        ImGui::SameLine();
-    };
-
-    modeButton("Blend", PreviewMode::Blend);
-    modeButton("Checkerboard", PreviewMode::Checkerboard);
-    modeButton("Difference", PreviewMode::Difference);
-    modeButton("Multiply", PreviewMode::Multiply);
-    ImGui::NewLine();
-
-    if (prefs.previewMode == PreviewMode::Blend)
-    {
-        ImGui::SliderFloat("Blend Alpha", &prefs.blendAlpha, 0.0f, 1.0f, "%.2f");
-    }
-    else if (prefs.previewMode == PreviewMode::Checkerboard)
-    {
-        ImGui::SliderInt("Checker Size", &prefs.checkerSize, 4, 128);
-    }
-    ImGui::Checkbox("Sync Viewports (zoom/pan)", &prefs.syncViewports);
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
-    {
-        ImGui::SetTooltip("When enabled, zooming/panning any of the 3 viewers moves all of them together.");
-    }
-
     if (m_liveMutualInformation >= 0.0)
     {
         const ImVec4 color = m_liveMutualInformation >= 0.6f ? ImVec4(0.4f, 0.9f, 0.5f, 1.0f)
@@ -508,8 +486,48 @@ void ViewerPanel::DrawPreviewModeControls(AppContext& context)
         ImGui::TextDisabled("Mutual Information: n/a (enable 'Use Alignment In Preview')");
     }
 
+    if (ImGui::CollapsingHeader("Blend / Compositing"))
+    {
+        auto modeButton = [&](const char* label, PreviewMode mode)
+        {
+            const bool isActive = prefs.previewMode == mode;
+            if (isActive)
+            {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.27f, 0.46f, 0.79f, 1.0f));
+            }
+            if (ImGui::Button(label))
+            {
+                prefs.previewMode = mode;
+            }
+            if (isActive)
+            {
+                ImGui::PopStyleColor();
+            }
+            ImGui::SameLine();
+        };
+
+        modeButton("Blend", PreviewMode::Blend);
+        modeButton("Checkerboard", PreviewMode::Checkerboard);
+        modeButton("Difference", PreviewMode::Difference);
+        modeButton("Multiply", PreviewMode::Multiply);
+        ImGui::NewLine();
+
+        if (prefs.previewMode == PreviewMode::Blend)
+        {
+            ImGui::SliderFloat("Blend Alpha", &prefs.blendAlpha, 0.0f, 1.0f, "%.2f");
+        }
+        else if (prefs.previewMode == PreviewMode::Checkerboard)
+        {
+            ImGui::SliderInt("Checker Size", &prefs.checkerSize, 4, 128);
+        }
+        ImGui::Checkbox("Sync Viewports (zoom/pan)", &prefs.syncViewports);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
+        {
+            ImGui::SetTooltip("When enabled, zooming/panning any of the 3 viewers moves all of them together.");
+        }
+    }
+
     ImGui::PopID();
-    ImGui::Separator();
 }
 
 void ViewerPanel::Draw(AppContext& context, const ImVec2& size)
@@ -539,6 +557,18 @@ void ViewerPanel::Draw(AppContext& context, const ImVec2& size)
     }
     ImGui::SameLine();
     ImGui::Text("Zoom %.2fx", zoomPan.zoom);
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
+    {
+        ImGui::SetTooltip("Mouse: wheel to zoom, middle-button drag to pan.\n%s",
+                          m_content == ViewerContent::Preview
+                              ? "This panel composites Stack A and Stack B; use Landmark/Transpose mode from the "
+                                "left panel to refine alignment here."
+                              : (context.landmarkModeEnabled
+                                     ? "Landmarks: click to place/reposition, drag an existing point to adjust."
+                                     : "Landmark mode is off (enable it from the left panel)."));
+    }
     ImGui::PopID();
 
     if (m_content == ViewerContent::Preview)
@@ -546,27 +576,39 @@ void ViewerPanel::Draw(AppContext& context, const ImVec2& size)
         DrawPreviewModeControls(context);
     }
 
-    if (m_content == ViewerContent::StackA)
+    UiPreferences& contourPrefs = context.session.uiPreferences;
+    bool& showContours = m_content == ViewerContent::StackA ? contourPrefs.showContoursA :
+                         m_content == ViewerContent::StackB ? contourPrefs.showContoursB : contourPrefs.showContoursPreview;
+    ImGui::Checkbox("Show contours", &showContours);
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
     {
-        DrawWindowLevelControls("wl_a", nullptr, GetActiveFixedStack(context.session));
-    }
-    else if (m_content == ViewerContent::StackB)
-    {
-        DrawWindowLevelControls("wl_b", nullptr, GetActiveMovingStack(context.session));
-    }
-    else
-    {
-        DrawWindowLevelControls("wl_pa", "Stack A window:", GetActiveFixedStack(context.session));
-        DrawWindowLevelControls("wl_pb", "Stack B window:", GetActiveMovingStack(context.session));
+        ImGui::SetTooltip(m_content == ViewerContent::Preview
+                              ? "Canny edges: reference in green, moving in magenta. Moving edges follow the active alignment."
+                              : "Show Canny edges over this image.");
     }
 
-    ImGui::TextUnformatted("Mouse: wheel zoom, middle-button drag pan.");
-    if (m_content != ViewerContent::Preview)
+    const StackModel& stackA = GetActiveFixedStack(context.session);
+    const StackModel& stackB = GetActiveMovingStack(context.session);
+    const bool showWindowLevel = (m_content == ViewerContent::StackA && stackA.isDicom) ||
+                                 (m_content == ViewerContent::StackB && stackB.isDicom) ||
+                                 (m_content == ViewerContent::Preview && (stackA.isDicom || stackB.isDicom));
+    if (showWindowLevel && ImGui::CollapsingHeader("Window/Level"))
     {
-        ImGui::TextUnformatted(context.landmarkModeEnabled
-                                   ? "Landmarks: click to place/reposition, drag an existing point to adjust."
-                                   : "Landmarks mode is off.");
+        if (m_content == ViewerContent::StackA)
+        {
+            DrawWindowLevelControls("wl_a", nullptr, GetActiveFixedStack(context.session));
+        }
+        else if (m_content == ViewerContent::StackB)
+        {
+            DrawWindowLevelControls("wl_b", nullptr, GetActiveMovingStack(context.session));
+        }
+        else
+        {
+            DrawWindowLevelControls("wl_pa", "Stack A window:", GetActiveFixedStack(context.session));
+            DrawWindowLevelControls("wl_pb", "Stack B window:", GetActiveMovingStack(context.session));
+        }
     }
+
     ImGui::TextWrapped("%s", m_statusText.c_str());
     DrawImageCanvas(context, ImGui::GetContentRegionAvail());
     ImGui::EndChild();
@@ -659,6 +701,9 @@ void ViewerPanel::RefreshTexture(AppContext& context)
             : currentRegistration;
     const bool useAlignmentPreview = context.session.projectPreferences.useAlignmentPreview &&
                                      HasUsableTransform(registration);
+    const UiPreferences& uiPrefs = context.session.uiPreferences;
+    const bool showContours = m_content == ViewerContent::StackA ? uiPrefs.showContoursA :
+                              m_content == ViewerContent::StackB ? uiPrefs.showContoursB : uiPrefs.showContoursPreview;
     double currentTx = 0.0;
     double currentTy = 0.0;
     double currentTheta = 0.0;
@@ -676,6 +721,7 @@ void ViewerPanel::RefreshTexture(AppContext& context)
         }
 
         if (m_loadedFilePath == slice->filePath &&
+            m_loadedShowContours == showContours &&
             m_loadedWindowCenterA == GetActiveFixedStack(context.session).windowCenter &&
             m_loadedWindowWidthA == GetActiveFixedStack(context.session).windowWidth &&
             m_loadedFlipHA == slice->flipHorizontal && m_loadedFlipVA == slice->flipVertical &&
@@ -694,7 +740,12 @@ void ViewerPanel::RefreshTexture(AppContext& context)
             return;
         }
 
+        if (showContours)
+        {
+            DrawContours(image, DetectContours(image), cv::Scalar(80, 230, 80));
+        }
         m_texture.Upload(image);
+        m_loadedShowContours = showContours;
         m_loadedFilePath = slice->filePath;
         m_loadedUsedAlignment = false;
         m_loadedWindowCenterA = GetActiveFixedStack(context.session).windowCenter;
@@ -717,6 +768,7 @@ void ViewerPanel::RefreshTexture(AppContext& context)
         }
 
         if (m_loadedFilePath == slice->filePath &&
+            m_loadedShowContours == showContours &&
             m_loadedWindowCenterB == GetActiveMovingStack(context.session).windowCenter &&
             m_loadedWindowWidthB == GetActiveMovingStack(context.session).windowWidth &&
             m_loadedFlipHB == slice->flipHorizontal && m_loadedFlipVB == slice->flipVertical &&
@@ -735,7 +787,12 @@ void ViewerPanel::RefreshTexture(AppContext& context)
             return;
         }
 
+        if (showContours)
+        {
+            DrawContours(image, DetectContours(image), cv::Scalar(220, 80, 220));
+        }
         m_texture.Upload(image);
+        m_loadedShowContours = showContours;
         m_loadedFilePath = slice->filePath;
         m_loadedUsedAlignment = false;
         m_loadedWindowCenterB = GetActiveMovingStack(context.session).windowCenter;
@@ -759,6 +816,7 @@ void ViewerPanel::RefreshTexture(AppContext& context)
 
     const bool previewConfigUnchanged =
         m_loadedPreviewMode == context.session.uiPreferences.previewMode &&
+        m_loadedShowContours == showContours &&
         m_loadedBlendAlpha == context.session.uiPreferences.blendAlpha &&
         m_loadedCheckerSize == context.session.uiPreferences.checkerSize;
     const double registrationScore = registration != nullptr ? registration->score : -1.0;
@@ -813,7 +871,27 @@ void ViewerPanel::RefreshTexture(AppContext& context)
         return;
     }
 
+    if (showContours)
+    {
+        DrawContours(preview, DetectContours(imageA), cv::Scalar(80, 230, 80));
+        cv::Mat movingEdges = DetectContours(imageB);
+        if (useAlignmentPreview)
+        {
+            cv::Mat affine = (cv::Mat_<double>(2, 3) << registration->forward.matrix[0], registration->forward.matrix[1], registration->forward.matrix[2],
+                               registration->forward.matrix[3], registration->forward.matrix[4], registration->forward.matrix[5]);
+            cv::Mat warpedEdges;
+            cv::warpAffine(movingEdges, warpedEdges, affine, imageA.size(), cv::INTER_NEAREST, cv::BORDER_CONSTANT, cv::Scalar(0));
+            movingEdges = std::move(warpedEdges);
+        }
+        else if (movingEdges.size() != imageA.size())
+        {
+            cv::resize(movingEdges, movingEdges, imageA.size(), 0.0, 0.0, cv::INTER_NEAREST);
+        }
+        DrawContours(preview, movingEdges, cv::Scalar(220, 80, 220));
+    }
+
     m_texture.Upload(preview);
+    m_loadedShowContours = showContours;
     m_loadedSliceA = sliceA->stackIndex;
     m_loadedSliceB = sliceB->stackIndex;
     m_loadedPreviewMode = context.session.uiPreferences.previewMode;

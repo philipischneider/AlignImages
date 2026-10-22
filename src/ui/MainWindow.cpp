@@ -330,12 +330,19 @@ void MainWindow::Draw(AppContext& context, GLFWwindow* window)
 
     DrawMenuBar(context);
 
+    UiPreferences& uiPrefs = context.session.uiPreferences;
     const float totalWidth = ImGui::GetContentRegionAvail().x;
     const float totalHeight = ImGui::GetContentRegionAvail().y;
-    const float leftWidth = totalWidth * 0.22f;
-    const float rightWidth = totalWidth * 0.20f;
-    const float centerWidth = totalWidth - leftWidth - rightWidth - 16.0f;
+    constexpr float splitterWidth = 8.0f;
     constexpr float splitterHeight = 8.0f;
+    constexpr float collapsedRightWidth = 28.0f;
+    const float leftWidth = totalWidth * 0.22f;
+    const float minRightWidthFraction = 0.12f;
+    const float maxRightWidthFraction = 0.40f;
+    uiPrefs.rightPanelWidthFraction =
+        (std::clamp)(uiPrefs.rightPanelWidthFraction, minRightWidthFraction, maxRightWidthFraction);
+    const float rightWidth = uiPrefs.rightPanelCollapsed ? collapsedRightWidth : totalWidth * uiPrefs.rightPanelWidthFraction;
+    const float centerWidth = totalWidth - leftWidth - rightWidth - splitterWidth - 8.0f;
     const float minTimelineHeight = 150.0f;
     const float maxTimelineHeight = (std::max)(180.0f, totalHeight * 0.55f);
     context.session.uiPreferences.timelineHeight =
@@ -354,8 +361,34 @@ void MainWindow::Draw(AppContext& context, GLFWwindow* window)
 
     ImGui::SameLine();
 
+    ImGui::InvisibleButton("RightPanelSplitter", ImVec2(splitterWidth, upperHeight));
+    if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+    {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+    }
+    if (ImGui::IsItemActive() && !uiPrefs.rightPanelCollapsed && totalWidth > 0.0f)
+    {
+        uiPrefs.rightPanelWidthFraction = (std::clamp)(
+            uiPrefs.rightPanelWidthFraction - ImGui::GetIO().MouseDelta.x / totalWidth,
+            minRightWidthFraction,
+            maxRightWidthFraction);
+    }
+
+    ImGui::SameLine();
+
     ImGui::BeginChild("RightPanel", ImVec2(rightWidth, upperHeight), true);
-    DrawRightPanel(context);
+    if (ImGui::Button(uiPrefs.rightPanelCollapsed ? "<<" : ">>"))
+    {
+        uiPrefs.rightPanelCollapsed = !uiPrefs.rightPanelCollapsed;
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
+    {
+        ImGui::SetTooltip(uiPrefs.rightPanelCollapsed ? "Expand diagnostics panel" : "Collapse diagnostics panel");
+    }
+    if (!uiPrefs.rightPanelCollapsed)
+    {
+        DrawRightPanel(context);
+    }
     ImGui::EndChild();
 
     ImGui::InvisibleButton("TimelineSplitter", ImVec2(-1.0f, splitterHeight));
@@ -1073,7 +1106,7 @@ void MainWindow::DrawLeftPanel(AppContext& context, GLFWwindow* window)
     }
     }
 
-    if (ImGui::CollapsingHeader("Preview & Display", ImGuiTreeNodeFlags_DefaultOpen))
+    if (ImGui::CollapsingHeader("Display", ImGuiTreeNodeFlags_DefaultOpen))
     {
     ImGui::TextUnformatted("UI Scale");
     const bool isAuto = context.session.uiPreferences.dpiMode == DpiMode::Auto;
@@ -1088,18 +1121,7 @@ void MainWindow::DrawLeftPanel(AppContext& context, GLFWwindow* window)
     }
     ImGui::SliderFloat("Scale Override", &context.session.uiPreferences.dpiOverride, 1.0f, 2.5f, "%.2fx");
     ImGui::Text("Detected Scale: %.2fx", GetWindowDpiScale(window));
-
-    ImGui::Separator();
-    ImGui::TextUnformatted("Preview");
-    const char* previewModes[] = {"Blend", "Checkerboard", "Difference", "Multiply"};
-    int previewMode = static_cast<int>(context.session.uiPreferences.previewMode);
-    if (ImGui::Combo("Mode", &previewMode, previewModes, IM_ARRAYSIZE(previewModes)))
-    {
-        context.session.uiPreferences.previewMode = static_cast<PreviewMode>(previewMode);
-    }
-    ImGui::SliderFloat("Blend Alpha", &context.session.uiPreferences.blendAlpha, 0.0f, 1.0f, "%.2f");
-    ImGui::SliderInt("Checker Size", &context.session.uiPreferences.checkerSize, 4, 128);
-    ImGui::Checkbox("Sync Viewports", &context.session.uiPreferences.syncViewports);
+    ImGui::TextDisabled("(Blend mode, sync viewports, etc. moved to the Preview panel itself)");
     }
 
     ImGui::Separator();

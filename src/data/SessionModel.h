@@ -80,8 +80,13 @@ struct UiPreferences
     PreviewMode previewMode = PreviewMode::Blend;
     float blendAlpha = 0.5f;
     int checkerSize = 32;
+    bool showContoursA = false;
+    bool showContoursB = false;
+    bool showContoursPreview = false;
     bool syncViewports = true;
     float timelineHeight = 260.0f;
+    float rightPanelWidthFraction = 0.20f;
+    bool rightPanelCollapsed = false;
 };
 
 struct AnimatedExportSettings

@@ -70,6 +70,7 @@ private:
     PreviewMode m_loadedPreviewMode = PreviewMode::Blend;
     float m_loadedBlendAlpha = -1.0f;
     int m_loadedCheckerSize = -1;
+    bool m_loadedShowContours = false;
     double m_loadedRegistrationScore = -1.0;
     bool m_loadedUsedAlignment = false;
     double m_loadedTx = 0.0;

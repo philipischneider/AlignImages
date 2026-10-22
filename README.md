@@ -9,6 +9,7 @@ O projeto foi desenhado para Windows e hoje já cobre:
 - timeline unificada com as duas pilhas em um único painel rolável
 - viewers de referência, móvel e preview
 - modos de preview `blend`, `checkerboard`, `difference` e `multiply`
+- contornos Canny opcionais em cada viewer; no preview, referência em verde e móvel em magenta acompanhando a transformação ativa
 - zoom e pan por mouse nos viewers
 - alinhamento automático inicial
 - landmarks manuais

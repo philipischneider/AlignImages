@@ -113,6 +113,7 @@ O preview deve suportar:
 - checkerboard
 - difference
 - multiply
+- contornos Canny opcionais e independentes nos três viewers; no preview, os contornos da imagem móvel são transformados para o espaço da referência e desenhados em cor distinta
 
 Controles adicionais:
 

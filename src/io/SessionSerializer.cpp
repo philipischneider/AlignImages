@@ -170,8 +170,13 @@ Result SessionSerializer::Save(const SessionModel& session, const std::filesyste
         {"preview_mode", ToString(session.uiPreferences.previewMode)},
         {"blend_alpha", session.uiPreferences.blendAlpha},
         {"checker_size", session.uiPreferences.checkerSize},
+        {"show_contours_a", session.uiPreferences.showContoursA},
+        {"show_contours_b", session.uiPreferences.showContoursB},
+        {"show_contours_preview", session.uiPreferences.showContoursPreview},
         {"sync_viewports", session.uiPreferences.syncViewports},
-        {"timeline_height", session.uiPreferences.timelineHeight}
+        {"timeline_height", session.uiPreferences.timelineHeight},
+        {"right_panel_width_fraction", session.uiPreferences.rightPanelWidthFraction},
+        {"right_panel_collapsed", session.uiPreferences.rightPanelCollapsed}
     };
 
     auto serializeStack = [](const StackModel& stack)
@@ -417,8 +422,15 @@ Result SessionSerializer::Load(const std::filesystem::path& filePath, SessionMod
         loaded.uiPreferences.previewMode = ParsePreviewMode(root["ui"].value("preview_mode", "blend"));
         loaded.uiPreferences.blendAlpha = root["ui"].value("blend_alpha", loaded.uiPreferences.blendAlpha);
         loaded.uiPreferences.checkerSize = root["ui"].value("checker_size", loaded.uiPreferences.checkerSize);
+        loaded.uiPreferences.showContoursA = root["ui"].value("show_contours_a", false);
+        loaded.uiPreferences.showContoursB = root["ui"].value("show_contours_b", false);
+        loaded.uiPreferences.showContoursPreview = root["ui"].value("show_contours_preview", false);
         loaded.uiPreferences.syncViewports = root["ui"].value("sync_viewports", loaded.uiPreferences.syncViewports);
         loaded.uiPreferences.timelineHeight = root["ui"].value("timeline_height", loaded.uiPreferences.timelineHeight);
+        loaded.uiPreferences.rightPanelWidthFraction =
+            root["ui"].value("right_panel_width_fraction", loaded.uiPreferences.rightPanelWidthFraction);
+        loaded.uiPreferences.rightPanelCollapsed =
+            root["ui"].value("right_panel_collapsed", loaded.uiPreferences.rightPanelCollapsed);
     }
 
     auto parseStack = [](const nlohmann::json& node, StackModel& stack)
