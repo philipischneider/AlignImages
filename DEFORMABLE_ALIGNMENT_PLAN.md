@@ -2,6 +2,15 @@
 
 Registro de contexto e proposta em 22/10/2026. **Status: módulo experimental dedicado iniciado; preparação e revisão do baseline implementadas, motor deformável pendente.** O usuário autorizou começar o trabalho. Isso não autoriza substituir resultados aceitos.
 
+## Atualizacao: resolucao adaptativa manual implementada
+
+O modulo experimental agora aceita retangulos de refino/protecao por fotografia.
+Apos a malha geral, otimiza patches locais mais finos com bordas suaves e
+continuidade fisica regularizada; protecao impede somente o incremento adaptativo.
+Auditoria, etapas intermediarias e gates separados preservam o resultado geral.
+Interface, formato e limitacoes em `experimental/deformable/REGIONAL_REFINEMENT.md`.
+Deteccao automatica de regioes e propagacao manual entre cortes continuam pendentes.
+
 ## Objetivo atualizado: alinhamento autônomo desde imagens não alinhadas
 
 O usuário esclareceu que deseja alinhar dados ainda sem registro. O módulo não deve exigir matrizes ou landmarks de uma sessão existente. A proposta anterior de começar obrigatoriamente pelo refinamento de uma sessão aceita fica superada como fluxo principal. O leitor e os relatórios existentes continuam úteis para diagnóstico e avaliação.
@@ -16,6 +25,29 @@ O usuário esclareceu que deseja alinhar dados ainda sem registro. O módulo nã
 - Próxima entrega funcional passa a ser inicialização global automática sem sessão, seguida de avaliação antes de liberar o ajuste deformável. A escolha entre sessões antigas não bloqueia esse desenvolvimento.
 
 ## Primeira entrega
+
+### Estado atual: refinamento regional implementado
+
+Esta seção atualiza as pendências históricas do documento: o motor regional
+agora existe. Detalhes e contrato: `experimental/deformable/REGIONAL_REFINEMENT.md`.
+
+- Malhas bicúbicas 7×7/13×13 com deslocamentos regionais e perdas de corpo/osso;
+  referência CT por limiar HU ≥150 dentro do corpo, ainda experimental.
+- Suporte de anotação exclui exterior ao antigo recorte. Penalidades de
+  magnitude, gradiente ósseo, suavidade, Jacobiano e continuidade em Z.
+- Continuidade compara vetores em mm paciente via geometria DICOM e inversa
+  global, ponderada pela distância entre planos; não confundir com calibração
+  independente XY da fotografia. Mantém vínculo através de mudança de FOV.
+- Composição inversa antes da amostragem do DICOM original; campo residual
+  guardado além da matriz global. Gates em resolução original e possibilidade
+  de reduzir passo/rejeitar o candidato, sem aceitar anatomia automaticamente.
+- Piloto `out/deformable/regional_pilot_001`: 32 cortes (100 e 234–264), 30
+  vínculos. Head005 excluído por máscara óssea vazia. Dice ósseo 0,7674→0,8715,
+  máximo deslocamento ~19,2 px, Jacobiano mínimo 0,389 (0,769 nas máscaras ósseas).
+- Viewer: comparação global/local, malha, máscaras/contornos deformados,
+  métricas e janela DICOM. Conferência Head247: preview/exportação idênticos.
+- Validação anatômica independente e extensão para toda a sequência continuam
+  pendentes. As seções anteriores de proposta e primeiras entregas são histórico.
 
 ### Retorno ao espaço das fotografias originais
 

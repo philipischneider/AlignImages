@@ -3,12 +3,14 @@ from dataclasses import dataclass, field
 import glob
 import json
 from pathlib import Path
+from functools import lru_cache
 
 import cv2
 import numpy as np
 import pydicom
 
-from prepare import build_preview, orient
+from prepare import build_preview, orient, digest
+from deformation import native_maps, remap_native, FIELD_CONVENTION
 
 
 @dataclass
@@ -24,6 +26,7 @@ class Entry:
     fixed_orientation: dict = field(default_factory=dict)
     moving_orientation: dict = field(default_factory=dict)
     masks: dict = field(default_factory=dict)
+    local: dict = field(default_factory=dict)
 
 
 def validated_matrix(values):
@@ -54,7 +57,8 @@ def discover(pattern):
                                      validated_matrix(data["forward_matrix_3x3"]), path,
                                      data.get("candidates", []), data.get("warnings", []), data.get("body_dice"),
                                      masks={("fixed_bone" if key == "reference_fixed_bone" else key): Path(value["path"])
-                                            for key, value in inputs.items() if key.endswith("bone")}))
+                                            for key, value in inputs.items() if key.endswith("bone")},
+                                     local=data.get("local_deformation", {})))
             elif "pairs" in data and "session_path" in data:
                 from prepare import load_session
                 _, _, fixed_stack, moving_stack, _ = load_session(data["session_path"])
@@ -113,7 +117,23 @@ class Source:
         return orient(image, self.orientation)
 
 
-def warp(image, matrix, shape, nearest=False):
+@lru_cache(maxsize=4)
+def local_field(path, expected_sha256):
+    if expected_sha256 and digest(path) != expected_sha256:
+        raise ValueError("Local field checksum mismatch")
+    with np.load(path, allow_pickle=False) as data:
+        if "convention" not in data or str(data["convention"]) != FIELD_CONVENTION:
+            raise ValueError("Unsupported local field direction/convention")
+        field, roi = data["displacement_xy"].copy(), data["roi"].tolist()
+    if len(roi) != 4 or field.shape != (roi[3], roi[2], 2) or not np.isfinite(field).all():
+        raise ValueError("Invalid local field")
+    return field, roi
+
+
+def warp(image, matrix, shape, nearest=False, local=None):
+    if local is not None:
+        field, roi = local
+        return remap_native(image, matrix, shape, field, roi, nearest)
     return cv2.warpAffine(image, matrix[:2], (shape[1], shape[0]), flags=cv2.INTER_NEAREST if nearest else cv2.INTER_LINEAR)
 
 
@@ -121,7 +141,7 @@ def edges(image):
     return cv2.Canny(cv2.GaussianBlur(cv2.cvtColor(image, cv2.COLOR_BGR2GRAY), (5, 5), 1), 60, 150)
 
 
-def mutual_information(fixed, moving, transform):
+def mutual_information(fixed, moving, transform, local=None):
     """Same 32-bin partial-volume histogram and normalization as the C++ viewer."""
     scale = min(1., 220 / max(fixed.shape[:2]))
     size = (max(1, int(fixed.shape[1] * scale)), max(1, int(fixed.shape[0] * scale)))
@@ -130,6 +150,15 @@ def mutual_information(fixed, moving, transform):
     gray = cv2.cvtColor(moving, cv2.COLOR_BGR2GRAY)
     b = cv2.warpAffine(gray, affine, size, flags=cv2.INTER_LINEAR)
     valid = cv2.warpAffine(np.ones(gray.shape, np.uint8), affine, size, flags=cv2.INTER_NEAREST) != 0
+    if local is not None:
+        # Sample the same composed map as the preview, including validity of native CT support.
+        mx, my = native_maps(transform, fixed.shape, *local)
+        xx, yy = np.meshgrid(np.arange(size[0], dtype=np.float32) / scale,
+                             np.arange(size[1], dtype=np.float32) / scale)
+        small_x = cv2.remap(mx, xx, yy, cv2.INTER_LINEAR)
+        small_y = cv2.remap(my, xx, yy, cv2.INTER_LINEAR)
+        b = cv2.remap(gray, small_x, small_y, cv2.INTER_LINEAR)
+        valid = cv2.remap(np.ones(gray.shape, np.uint8), small_x, small_y, cv2.INTER_NEAREST) != 0
     if not valid.any():
         return 0.
     af = np.minimum(31, (a[valid].astype(float) / 8).astype(int))
@@ -148,6 +177,18 @@ def mutual_information(fixed, moving, transform):
     return float(np.clip(2 * (ha + hb - hab) / (ha + hb), 0, 1)) if ha + hb > 1e-9 else 0.
 
 
-def compose(fixed, moving, transform, mode="blend", alpha=.5, checker=32, alignment=True):
-    aligned = warp(moving, transform, fixed.shape) if alignment else cv2.resize(moving, (fixed.shape[1], fixed.shape[0]))
+def aligned_display(source, transform, shape, center, width, local=None):
+    """For DICOM, interpolate physical intensities before applying a display window."""
+    if not source.dicom:
+        return warp(source.display(center, width), transform, shape, local=local)
+    raw = orient(source.raw, source.orientation)
+    value = remap_native(raw, transform, shape, *(local or (None, None)), border=-1024.)
+    displayed = np.clip((value - (center - width / 2)) * 255 / max(1., width), 0, 255).astype(np.uint8)
+    if source.monochrome1:
+        displayed = 255 - displayed
+    return cv2.cvtColor(displayed, cv2.COLOR_GRAY2BGR)
+
+
+def compose(fixed, moving, transform, mode="blend", alpha=.5, checker=32, alignment=True, local=None, aligned_override=None):
+    aligned = aligned_override if alignment and aligned_override is not None else warp(moving, transform, fixed.shape, local=local) if alignment else cv2.resize(moving, (fixed.shape[1], fixed.shape[0]))
     return build_preview(fixed, aligned, {"preview_mode": mode, "blend_alpha": alpha, "checker_size": checker})

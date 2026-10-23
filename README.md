@@ -4,7 +4,12 @@ O modulo experimental independente de refinamento deformavel esta em
 [`experimental/deformable`](experimental/deformable/README.md). A primeira
 etapa prepara e audita os dados e gera uma revisao navegavel do alinhamento
 existente. O modulo tambem estima alinhamento global autonomo de pares novos,
-sem matrizes de sessao; deformacao local e continuidade ainda estao pendentes.
+sem matrizes de sessao, e refinamento regional experimental com continuidade
+entre cortes e revisao interativa da malha.
+O visualizador experimental oferece a aba `Reprocessamento / malha`, com resolucao
+configuravel, processamento em segundo plano e cancelamento sem substituir resultados.
+Novos processamentos preservam etapas intermediarias, selecionaveis no diagnostico.
+Regioes manuais permitem malhas locais mais finas e protecao do incremento adaptativo.
 
 Ferramenta desktop em C++ para alinhamento iterativo de pilhas de imagens 2D do Visible Human Project e de outras modalidades relacionadas.
 

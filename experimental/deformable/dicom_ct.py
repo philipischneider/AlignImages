@@ -53,6 +53,7 @@ def read_ct(path):
                                "shape": list(hu.shape), "hu_min": float(hu[valid].min()) if valid.any() else None,
                                "hu_max": float(hu[valid].max()) if valid.any() else None,
                                "series_uid": str(getattr(ds, "SeriesInstanceUID", "")),
+                               "frame_of_reference_uid": str(getattr(ds, "FrameOfReferenceUID", "")),
                                "sop_uid": str(getattr(ds, "SOPInstanceUID", ""))})
 
 

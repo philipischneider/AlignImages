@@ -1,5 +1,29 @@
 # Especificacao Tecnica - Ferramenta de Alinhamento de Pilhas de Imagens
 
+Nota de arquitetura: o laboratorio Python independente em `experimental/deformable/`
+implementa registro global e refinamento regional experimental para DICOM/foto.
+Nao altera sessoes C++ nem o exportador afim. Resultados compostos exigem a
+matriz global e o campo inverso residual; uma matriz 3x3 isolada nao representa
+a deformacao. Direcao, dominio, unidades, gates e auditoria estao descritos em
+`experimental/deformable/REGIONAL_REFINEMENT.md`. O visualizador dedicado compoe
+ambos antes de reamostrar a CT e mantem o candidato sujeito a revisao anatomica.
+O painel Python `processing_panel.py` inicia `run_local.py` via QProcess, com
+malhas e resolucao configuraveis, diretorio exclusivo por experimento e cancelamento
+cooperativo por arquivo-sinal. Somente execucoes concluidas substituem a revisao
+ativa; a auditoria mantem configuracao, entradas e status de cancelamento.
+Resultados regionais novos incluem `local_deformation.stages`: snapshots por nivel
+com campo inverso/hash/configuracao/metricas, antes dos gates finais. O seletor de
+etapas usa o mesmo corte e fontes nativas; resultados antigos sem stages permanecem
+compativeis. Campos intermediarios sao diagnosticos nao aprovados e nao substituem
+a componente local final avaliada pelos gates.
+Resolucao adaptativa manual: `adaptive_regions.py` define patches bicubicos locais
+em pixels da foto. Apos congelar a malha geral, `fit_sequence` otimiza incrementos
+com taper de borda e protecao local. Regioes sao especificas por fotografia;
+o incremento e nulo fora delas e dentro da protecao. Gates finais separam escala
+geral e adaptativa, preservando a base geral nas areas protegidas. Auditoria e
+resultados incluem regioes, patches e etapa adaptativa; o formato de campo inverso
+composto nao muda. Protecao nao congela fases globais/gerais anteriores.
+
 ## 1. Objetivo
 
 Desenvolver uma ferramenta desktop Windows, escrita em C++, para alinhamento iterativo e reversivel entre duas pilhas de imagens 2D de modalidades distintas, com foco inicial em imagens do Visible Human Project.

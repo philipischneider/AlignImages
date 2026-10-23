@@ -2,12 +2,34 @@
 
 ## Aplicativo interativo de revisão
 
+O motor regional e a continuidade foram implementados. Veja
+[REGIONAL_REFINEMENT.md](REGIONAL_REFINEMENT.md) para execução, limites,
+resultados e o contrato dos campos. O visualizador abre o piloto de 32 cortes
+e permite alternar global/local e exibir a malha. Descrições históricas de
+ausência de deformação abaixo referem-se aos executores globais/preparador.
+
 Abra `ReviewResults.cmd` com duplo clique, ou execute:
 
 ```powershell
 python experimental/deformable/viewer.py
-python experimental/deformable/viewer.py --results "out/deformable/dicom_full_photo_pilot_002"
+python experimental/deformable/viewer.py --results "out/deformable/regional_stages_001"
 ```
+
+A aba `Reprocessamento / malha` preenche os JSONs do piloto automaticamente.
+As ultimas escolhas validas sao lembradas entre aberturas em
+`out/deformable/reprocessing_inputs.ini`. Permite configurar nos por eixo
+(ex.: `7,13,25`), resolucao de processamento, iteracoes e CPU/CUDA.
+`Reprocessar` roda em segundo plano, em pasta nova, e salva snapshots por etapa.
+No diagnostico, `Etapa da deformacao` permite
+ver cada resolucao e o resultado final sem perder corte/zoom. Resultados antigos
+sem snapshots exigem novo processamento para disponibilizar as etapas.
+`Cancelar` preserva o resultado anterior e registra auditoria.
+O novo conjunto abre automaticamente ao concluir. Habilite `Regioes adaptativas
+(manual)`, escolha os nos locais e use `Marcar refino` ou `Marcar protecao`.
+Arraste na foto/preview: amarelo refina, verde protege apenas o incremento
+adaptativo. Cada marcacao vale para um corte. `Parar` encerra a marcacao;
+o seletor de etapas tambem mostra a fase adaptativa. Veja
+[REGIONAL_REFINEMENT.md](REGIONAL_REFINEMENT.md) para limites e significado da protecao.
 
 A janela carrega os resultados processados e oferece:
 

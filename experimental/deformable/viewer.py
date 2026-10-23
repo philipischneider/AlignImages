@@ -14,8 +14,9 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
     QDockWidget, QGroupBox, QFormLayout, QFileDialog, QMessageBox, QTableWidget,
     QTableWidgetItem, QAbstractItemView, QPlainTextEdit)
 
-from review_model import Source, compose, discover, edges, mutual_information, validated_matrix, warp
+from review_model import Source, compose, discover, edges, mutual_information, validated_matrix, warp, local_field, aligned_display
 from prepare import orient
+from processing_panel import ProcessingPanel
 
 
 def pixmap(image):
@@ -25,12 +26,17 @@ def pixmap(image):
 
 class Canvas(QWidget):
     changed = Signal(float, float, float)
+    region_selected = Signal(object)
 
     def __init__(self):
         super().__init__()
         self.image = QPixmap()
         self.zoom, self.pan_x, self.pan_y = 1., 0., 0.
         self.drag = None
+        self.selection_mode = ""
+        self.selection_start = None
+        self.selection_end = None
+        self.region_overlays = []
         self.setMinimumSize(180, 150)
         self.setMouseTracking(True)
         self.setToolTip("Roda: zoom · botão central: arrastar · duplo clique central: ajustar")
@@ -67,6 +73,15 @@ class Canvas(QWidget):
                       (self.height() - height) / 2 + self.pan_y * self.height(), width, height)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         p.drawPixmap(rect, self.image, QRectF(self.image.rect()))
+        overlays = list(self.region_overlays)
+        if self.selection_start is not None and self.selection_end is not None:
+            x, y = self.selection_start
+            xx, yy = self.selection_end
+            overlays.append({"rect": [min(x, xx), min(y, yy), abs(xx - x), abs(yy - y)], "mode": self.selection_mode})
+        for region in overlays:
+            x, y, w, h = region["rect"]
+            p.setPen(QColor("#ffbd45" if region["mode"] == "refine" else "#68e394"))
+            p.drawRect(QRectF(rect.left() + x * factor, rect.top() + y * factor, w * factor, h * factor))
         p.setPen(QColor("#b0bac8"))
         p.drawText(10, 20, f"Zoom {self.zoom:.2f}× · {self.image.width()} × {self.image.height()}")
 
@@ -75,19 +90,46 @@ class Canvas(QWidget):
         event.accept()
 
     def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.selection_mode and not self.image.isNull():
+            self.selection_start = self.image_position(event.position())
+            self.selection_end = self.selection_start
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.MiddleButton:
             self.drag = event.position()
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
 
     def mouseMoveEvent(self, event):
+        if self.selection_start is not None:
+            self.selection_end = self.image_position(event.position())
+            self.update()
+            return
         if self.drag is not None:
             delta = event.position() - self.drag
             self.drag = event.position()
             self.state(self.zoom, self.pan_x + delta.x() / self.width(), self.pan_y + delta.y() / self.height())
 
     def mouseReleaseEvent(self, event):
+        if self.selection_start is not None and event.button() == Qt.MouseButton.LeftButton:
+            end = self.image_position(event.position())
+            start = self.selection_start
+            self.selection_start = None
+            self.selection_end = None
+            left, top = min(start[0], end[0]), min(start[1], end[1])
+            width, height = abs(start[0] - end[0]), abs(start[1] - end[1])
+            if width >= 8 and height >= 8:
+                self.region_selected.emit([left, top, width, height])
+            self.update()
+            return
         self.drag = None
         self.unsetCursor()
+
+    def image_position(self, position):
+        factor = self.fit_scale() * self.zoom
+        left = (self.width() - self.image.width() * factor) / 2 + self.pan_x * self.width()
+        top = (self.height() - self.image.height() * factor) / 2 + self.pan_y * self.height()
+        return (int(np.clip(round((position.x() - left) / factor), 0, self.image.width() - 1)),
+                int(np.clip(round((position.y() - top) / factor), 0, self.image.height() - 1)))
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.MouseButton.MiddleButton:
@@ -208,6 +250,21 @@ class ReviewWindow(QMainWindow):
         side_layout = QVBoxLayout(side)
         self.mi = QLabel("Informação mútua: —")
         side_layout.addWidget(self.mi)
+        self.local_enabled = QCheckBox("Aplicar refino regional (candidato)")
+        self.local_enabled.setChecked(True)
+        self.local_enabled.toggled.connect(self.schedule)
+        self.show_mesh = QCheckBox("Mostrar malha de deformação")
+        self.show_mesh.toggled.connect(self.schedule)
+        side_layout.addWidget(self.local_enabled)
+        side_layout.addWidget(self.show_mesh)
+        side_layout.addWidget(QLabel("Etapa da deformacao"))
+        self.stage = QComboBox()
+        self.stage.currentIndexChanged.connect(self.schedule)
+        side_layout.addWidget(self.stage)
+        self.stage_notice = QLabel("Etapa intermediaria: antes dos criterios finais; nao validada.")
+        self.stage_notice.setWordWrap(True)
+        self.stage_notice.hide()
+        side_layout.addWidget(self.stage_notice)
         self.window_controls = []
         for name in ["Referência", "Móvel"]:
             group = QGroupBox(f"{name} · janela / nível")
@@ -239,8 +296,21 @@ class ReviewWindow(QMainWindow):
         self.details.setReadOnly(True)
         side_layout.addWidget(self.details, 1)
         self.dock.setWidget(side)
+        self.processing_dock = QDockWidget("Reprocessamento / malha", self)
+        self.processing = ProcessingPanel(self)
+        self.processing.completed.connect(self.open_pattern)
+        self.processing.draw_requested.connect(self.region_drawing)
+        self.processing.regions_changed.connect(self.update_region_overlays)
+        self.region_mode = ""
+        for i in [0, 2]:
+            self.panels[i].canvas.region_selected.connect(self.add_adaptive_region)
+        self.processing_dock.setWidget(self.processing)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.processing_dock)
+        self.tabifyDockWidget(self.dock, self.processing_dock)
+        self.dock.raise_()
         view_menu = self.menuBar().addMenu("Visualização")
         view_menu.addAction(self.dock.toggleViewAction())
+        view_menu.addAction(self.processing_dock.toggleViewAction())
         scale_menu = view_menu.addMenu("Escala da interface")
         for percent in [100, 125, 150, 175, 200]:
             action = scale_menu.addAction(f"{percent}%")
@@ -265,6 +335,29 @@ class ReviewWindow(QMainWindow):
         font = QApplication.font()
         font.setPointSizeF(9 * percent / 100)
         QApplication.setFont(font)
+
+    def region_drawing(self, mode):
+        self.region_mode = mode
+        for i in [0, 2]:
+            canvas = self.panels[i].canvas
+            canvas.selection_mode = mode
+            canvas.selection_start = None
+            canvas.selection_end = None
+            canvas.setCursor(Qt.CursorShape.CrossCursor if mode else Qt.CursorShape.ArrowCursor)
+        self.statusBar().showMessage("Arraste na foto ou preview para marcar " + mode if mode else "Marcacao encerrada")
+
+    def add_adaptive_region(self, rect):
+        if self.entries and self.region_mode and not self.processing.running():
+            self.processing.add_region(self.entries[self.index].fixed, rect, self.region_mode)
+
+    def update_region_overlays(self):
+        regions = []
+        if self.entries and self.processing.region_group.isChecked():
+            key = str(self.entries[self.index].fixed.resolve())
+            regions = [r for r in self.processing.regions if str(Path(r["photo_path"]).resolve()) == key]
+        for i in [0, 2]:
+            self.panels[i].canvas.region_overlays = regions
+            self.panels[i].canvas.update()
 
     def schedule(self, *args):
         self.pending.start(35)
@@ -297,6 +390,7 @@ class ReviewWindow(QMainWindow):
             return
         self.play.setChecked(False)
         self.entries = entries
+        self.processing.load_context(entries[0].origin)
         source_label = "DICOM original" if all(e.moving.suffix.lower() == ".dcm" for e in entries) else "fontes PNG / resultados anteriores"
         self.setWindowTitle(f"Deformable Lab — {source_label}")
         self.slice.blockSignals(True)
@@ -314,6 +408,14 @@ class ReviewWindow(QMainWindow):
         self.select(0)
         QTimer.singleShot(100, self.queue_thumbnails)
         self.statusBar().showMessage(f"{len(entries)} cortes · roda: zoom · botão central: pan · setas: navegar" + (f" · {len(errors)} arquivos ignorados" if errors else ""))
+
+    def closeEvent(self, event):
+        if self.processing.running():
+            self.processing.cancel()
+            self.statusBar().showMessage("Aguarde o cancelamento terminar antes de fechar.")
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     def navigate(self, delta):
         if self.entries:
@@ -364,8 +466,23 @@ class ReviewWindow(QMainWindow):
         if not 0 <= index < len(self.entries):
             return
         self.index = index
+        self.update_region_overlays()
         entry = self.entries[index]
         try:
+            previous_stage = self.stage.currentText()
+            self.stage.blockSignals(True)
+            self.stage.clear()
+            self.stage.addItem("Final (apos criterios)", entry.local)
+            for stage in entry.local.get("stages", []):
+                count = stage["count"]
+                label = f"Etapa {stage['level'] + 1}: adaptativa" if stage.get("adaptive") else f"Etapa {stage['level'] + 1}: {count} x {count}"
+                self.stage.addItem(label, stage)
+            stage_index = self.stage.findText(previous_stage)
+            self.stage.setCurrentIndex(max(0, stage_index))
+            self.stage.setEnabled(bool(entry.local.get("stages")))
+            self.stage.setToolTip("Etapas anteriores nao foram salvas neste resultado; reprocesse para gera-las."
+                                  if not entry.local.get("stages") else "Snapshots reais ao terminar cada etapa, antes dos criterios finais.")
+            self.stage.blockSignals(False)
             self.sources = [self.source(str(entry.fixed), json.dumps(entry.fixed_orientation)),
                             self.source(str(entry.moving), json.dumps(entry.moving_orientation))]
             for i, source in enumerate(self.sources):
@@ -409,12 +526,23 @@ class ReviewWindow(QMainWindow):
             return
         try:
             entry = self.entries[self.index]
+            selected_local = self.stage.currentData() or entry.local
+            self.stage_notice.setVisible(selected_local.get("status") == "intermediate_unvalidated")
+            if entry.local:
+                self.setWindowTitle("Deformable Lab | DICOM original | refino regional")
             fixed, moving = [source.display(controls[0].value(), controls[1].value()) for source, controls in zip(self.sources, self.window_controls)]
             transform = self.hypothesis.currentData()
             if transform is None:
                 transform = entry.transform
             alignment = self.alignment.isChecked()
-            output = compose(fixed, moving, transform, self.mode.currentData(), self.alpha.value() / 100, self.checker.value(), alignment)
+            available = selected_local.get("status") in {"candidate", "intermediate_unvalidated"} and self.hypothesis.currentIndex() == 0
+            self.local_enabled.setEnabled(available and alignment)
+            regional = local_field(selected_local["field_path"], selected_local.get("sha256")) if available and alignment and self.local_enabled.isChecked() else None
+            self.show_mesh.setEnabled(regional is not None)
+            displayed_aligned = aligned_display(self.sources[1], transform, fixed.shape,
+                                                self.window_controls[1][0].value(), self.window_controls[1][1].value(), regional) if alignment else None
+            output = compose(fixed, moving, transform, self.mode.currentData(), self.alpha.value() / 100,
+                             self.checker.value(), alignment, regional, displayed_aligned)
             images = [fixed.copy(), moving.copy(), output]
             edge_a, edge_b = edges(fixed), edges(moving)
             if self.panels[0].contours.isChecked():
@@ -422,7 +550,7 @@ class ReviewWindow(QMainWindow):
             if self.panels[1].contours.isChecked():
                 images[1][edge_b != 0] = (220, 80, 220)
             if self.panels[2].contours.isChecked():
-                eb = warp(edge_b, transform, fixed.shape, True) if alignment else cv2.resize(edge_b, (fixed.shape[1], fixed.shape[0]), interpolation=cv2.INTER_NEAREST)
+                eb = warp(edge_b, transform, fixed.shape, True, regional) if alignment else cv2.resize(edge_b, (fixed.shape[1], fixed.shape[0]), interpolation=cv2.INTER_NEAREST)
                 output[edge_a != 0] = (80, 230, 80)
                 output[eb != 0] = (220, 80, 220)
             if self.show_masks.isChecked():
@@ -441,16 +569,49 @@ class ReviewWindow(QMainWindow):
                     color = (0, 230, 255) if is_fixed else (255, 180, 40)
                     images[0 if is_fixed else 1][outline != 0] = color
                     if not is_fixed:
-                        outline = warp(outline, transform, fixed.shape, True) if alignment else cv2.resize(outline, (fixed.shape[1], fixed.shape[0]), interpolation=cv2.INTER_NEAREST)
+                        outline = warp(outline, transform, fixed.shape, True, regional) if alignment else cv2.resize(outline, (fixed.shape[1], fixed.shape[0]), interpolation=cv2.INTER_NEAREST)
                     output[outline != 0] = color
+            if regional is not None and self.show_mesh.isChecked():
+                field, roi = regional
+                left, top, width, height = roi
+                grid = np.zeros(fixed.shape[:2], np.uint8)
+                count = selected_local.get("settings", {}).get("nodes", [13])[-1]
+                for x in np.linspace(left, left + width - 1, count).round().astype(int):
+                    cv2.line(grid, (x, top), (x, top + height - 1), 255, 1)
+                for y in np.linspace(top, top + height - 1, count).round().astype(int):
+                    cv2.line(grid, (left, y), (left + width - 1, y), 255, 1)
+                active_regions = selected_local.get("adaptive_regions", []) if selected_local.get("adaptive") or selected_local.get("adaptive_step_scale", 0) > 0 else []
+                for region in active_regions:
+                    if region["mode"] != "refine":
+                        continue
+                    x, y, w, h = map(int, region["rect"])
+                    right, bottom = min(x + w - 1, left + width - 1), min(y + h - 1, top + height - 1)
+                    x, y = max(x, left), max(y, top)
+                    w, h = right - x + 1, bottom - y + 1
+                    n = int(region.get("nodes", 9))
+                    for xx in np.linspace(x, x + w - 1, n).round().astype(int):
+                        cv2.line(grid, (xx, y), (xx, y + h - 1), 255, 1)
+                    for yy in np.linspace(y, y + h - 1, n).round().astype(int):
+                        cv2.line(grid, (x, yy), (x + w - 1, yy), 255, 1)
+                output[warp(grid, np.eye(3), fixed.shape, True, regional) != 0] = (255, 190, 60)
             for panel, image in zip(self.panels, images):
                 panel.canvas.set_image(image)
             self.alpha_label.setText(f"{self.alpha.value()}%")
             self.alpha.setEnabled(self.mode.currentData() == "blend")
             self.checker.setEnabled(self.mode.currentData() == "checkerboard")
-            score = mutual_information(self.sources[0].display(), self.sources[1].display(), transform) if alignment else None
+            score = mutual_information(self.sources[0].display(), self.sources[1].display(), transform, regional) if alignment else None
             self.mi.setText(f"Informação mútua: {score:.3f}" if score is not None else "Informação mútua: — (alinhamento desligado)")
-            self.details.setPlainText(f"{entry.label}\n\nReferência: {entry.fixed}\nMóvel: {entry.moving}\nResultado: {entry.origin}\n\nDice corporal original: {entry.score}\nA métrica não valida anatomia interna.\n\n" + "\n".join(entry.warnings) + "\n\nMatriz visualizada:\n" + np.array2string(transform, precision=5))
+            shown_body = selected_local.get("metrics", {}).get("body_after" if regional is not None else "body_before", entry.score)
+            self.details.setPlainText(f"{entry.label}\n\nReferência: {entry.fixed}\nMóvel: {entry.moving}\nResultado: {entry.origin}\n\nDice corporal: {shown_body}\nA métrica não valida anatomia interna.\n\n" + "\n".join(entry.warnings) + "\n\nMatriz global visualizada:\n" + np.array2string(transform, precision=5))
+            if entry.local:
+                metrics = selected_local.get("metrics", {})
+                self.details.appendPlainText("\n" + self.stage.currentText() + "\nRefino regional: " + selected_local.get("status", "") +
+                    (" (ativado)" if regional is not None else " (desativado)") + "\n" + json.dumps(metrics, indent=2, ensure_ascii=False) +
+                    "\nA matriz acima é apenas a componente global; o campo residual compõe o mapeamento completo.")
+                if selected_local.get("status") == "intermediate_unvalidated":
+                    self.details.appendPlainText("ETAPA INTERMEDIARIA: antes dos criterios finais; pode conter piora local ou distorcao. Nao e alinhamento aprovado.")
+                if "adaptive_step_scale" in selected_local:
+                    self.details.appendPlainText(f"Passo geral: {selected_local['base_step_scale']}; incremento adaptativo: {selected_local['adaptive_step_scale']}")
         except Exception as exc:
             self.player.stop()
             self.details.setPlainText(f"Erro de visualização: {exc}")
@@ -458,7 +619,7 @@ class ReviewWindow(QMainWindow):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--results", default=str(Path(__file__).resolve().parents[2] / "out/deformable/dicom_full_photo_pilot_002"))
+    parser.add_argument("--results", default=str(Path(__file__).resolve().parents[2] / "out/deformable/regional_stages_001"))
     parser.add_argument("--smoke-screenshot", help="Save a screenshot and quit, for UI verification")
     args = parser.parse_args()
     app = QApplication(sys.argv[:1])
